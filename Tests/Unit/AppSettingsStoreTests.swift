@@ -3,6 +3,160 @@ import XCTest
 
 @MainActor
 final class AppSettingsStoreTests: XCTestCase {
+    func testBottomGapNativeControlsKeepEightPointGapsAtDifferentParentWidths() {
+        let control = DockBottomGapControlView(range: AppSettingsStore.dockBottomGapRange)
+        for width in [284.0, 560.0, 700.0] {
+            control.frame = NSRect(x: 0, y: 0, width: width, height: 28)
+            control.layout()
+            XCTAssertEqual(control.slider.frame.minX - control.minusButton.frame.maxX, 8)
+            XCTAssertEqual(control.plusButton.frame.minX - control.slider.frame.maxX, 8)
+            XCTAssertEqual(control.readout.frame.minX - control.plusButton.frame.maxX, 8)
+            XCTAssertEqual(control.readout.frame.maxX, width)
+            XCTAssertEqual(control.slider.numberOfTickMarks, 0)
+        }
+        control.setValue(0)
+        XCTAssertFalse(control.minusButton.isEnabled)
+        XCTAssertTrue(control.plusButton.isEnabled)
+        control.setValue(20)
+        XCTAssertTrue(control.minusButton.isEnabled)
+        XCTAssertFalse(control.plusButton.isEnabled)
+        XCTAssertEqual(control.readout.stringValue, "20 pt")
+    }
+
+    func testIndicatorAndClickScaleOptionsPersistIndependentlyWithoutLayoutChanges() {
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(defaults: defaults)
+        let metrics = store.dockPanelMetrics
+        XCTAssertTrue(store.showRunningIndicators)
+        XCTAssertTrue(store.clickScaleEnabled)
+        store.setShowRunningIndicators(false)
+        var restored = AppSettingsStore(defaults: defaults)
+        XCTAssertFalse(restored.showRunningIndicators)
+        XCTAssertTrue(restored.clickScaleEnabled)
+        store.setClickScaleEnabled(false)
+        restored = AppSettingsStore(defaults: defaults)
+        XCTAssertFalse(restored.showRunningIndicators)
+        XCTAssertFalse(restored.clickScaleEnabled)
+        XCTAssertTrue(restored.hoverMagnificationEnabled)
+        XCTAssertEqual(restored.dockPanelMetrics, metrics)
+        restored.setShowRunningIndicators(true)
+        restored = AppSettingsStore(defaults: defaults)
+        XCTAssertTrue(restored.showRunningIndicators)
+        XCTAssertFalse(restored.clickScaleEnabled)
+        restored.setClickScaleEnabled(true)
+        XCTAssertTrue(AppSettingsStore(defaults: defaults).clickScaleEnabled)
+    }
+
+    func testDrawerTogglePersistsWithoutRemovingContentsAndCentersDockAlone() {
+        let defaults = makeDefaults()
+        defaults.set(["com.example.kept"], forKey: "drawerBundleIDs")
+        let store = AppSettingsStore(defaults: defaults)
+        XCTAssertTrue(store.showDrawer)
+        let enabledMetrics = store.dockPanelMetrics
+        store.setShowDrawer(false)
+        let reloaded = AppSettingsStore(defaults: defaults)
+        XCTAssertFalse(reloaded.showDrawer)
+        XCTAssertEqual(defaults.stringArray(forKey: "drawerBundleIDs"), ["com.example.kept"])
+        XCTAssertEqual(reloaded.dockPanelMetrics.capsuleWidth, 0)
+        XCTAssertEqual(reloaded.dockPanelMetrics.capsuleGap, 0)
+        let screen = PanelScreenGeometry(frame: CGRect(x: -1440, y: 0, width: 1440, height: 900),
+            visibleFrame: CGRect(x: -1440, y: 0, width: 1440, height: 875), safeAreaTop: 0)
+        let dock = PanelGeometry.dockTargetFrame(contentWidth: 500, on: screen, metrics: reloaded.dockPanelMetrics)
+        XCTAssertEqual(dock.midX, screen.frame.midX)
+        reloaded.setShowDrawer(true)
+        XCTAssertTrue(AppSettingsStore(defaults: defaults).showDrawer)
+        XCTAssertEqual(reloaded.dockPanelMetrics.capsuleWidth, enabledMetrics.capsuleWidth)
+        XCTAssertEqual(reloaded.dockPanelMetrics.capsuleGap, enabledMetrics.capsuleGap)
+    }
+
+    func testGlassChoicesPersistWithoutChangingAppearanceOrGeometry() {
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(defaults: defaults)
+        store.setAppearanceMode(.dark)
+        let metrics = store.dockPanelMetrics
+        XCTAssertEqual(Set(DockBackgroundStyle.allCases.map(\.rawValue)), ["classic", "variant3"])
+        for style in DockBackgroundStyle.allCases {
+            store.setDockBackgroundStyle(style)
+            let restored = AppSettingsStore(defaults: defaults)
+            XCTAssertEqual(restored.dockBackgroundStyle, style)
+            XCTAssertEqual(restored.appearanceMode, .dark)
+            XCTAssertEqual(restored.dockPanelMetrics, metrics)
+        }
+    }
+
+    func testRetiredGlassSettingsMigrateOnceAndAreRemoved() {
+        for oldStyle in ["clear", "dark", "native", "classic", "variant3"] {
+            let defaults = makeDefaults()
+            defaults.set(oldStyle, forKey: "com.tungsten.edge.dockBackgroundStyle")
+            for key in ["nativeGlassExperiment", "nativeGlassComposition", "debugGlassProfile"] {
+                defaults.set("retired", forKey: "com.tungsten.edge." + key)
+            }
+            let store = AppSettingsStore(defaults: defaults)
+            XCTAssertEqual(store.dockBackgroundStyle, oldStyle == "classic" ? .classic : .variant3)
+            for key in ["nativeGlassExperiment", "nativeGlassComposition", "debugGlassProfile"] {
+                XCTAssertNil(defaults.object(forKey: "com.tungsten.edge." + key))
+            }
+            store.setDockBackgroundStyle(.classic)
+            XCTAssertEqual(AppSettingsStore(defaults: defaults).dockBackgroundStyle, .classic)
+        }
+        let defaults = makeDefaults()
+        defaults.set(false, forKey: "com.tungsten.edge.clearGlassBackgroundEnabled")
+        XCTAssertEqual(AppSettingsStore(defaults: defaults).dockBackgroundStyle, .classic)
+        XCTAssertNil(defaults.object(forKey: "com.tungsten.edge.clearGlassBackgroundEnabled"))
+    }
+
+    func testBottomGapDefaultsAndPersistsFlushToScreen() {
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(defaults: defaults)
+        XCTAssertEqual(store.dockBottomGap, 8)
+        store.setDockBottomGap(0)
+        let reloaded = AppSettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.dockBottomGap, 0)
+        let screen = PanelScreenGeometry(
+            frame: CGRect(x: 0, y: -900, width: 1440, height: 900),
+            visibleFrame: CGRect(x: 0, y: -900, width: 1440, height: 875), safeAreaTop: 0)
+        let frame = PanelGeometry.dockTargetFrame(contentWidth: 500, on: screen, metrics: reloaded.dockPanelMetrics)
+        XCTAssertEqual(frame.minY + reloaded.dockPanelMetrics.shadowPadding, screen.frame.minY)
+        store.setDockPanelHeight(DockPanelHeight(clamping: 80))
+        XCTAssertEqual(store.dockPanelMetrics.bottomGap, 0)
+    }
+
+    func testBottomGapSanitizesStoredAndInputValues() {
+        let defaults = makeDefaults()
+        defaults.set(-10, forKey: "com.tungsten.edge.dockBottomGap")
+        let store = AppSettingsStore(defaults: defaults)
+        XCTAssertEqual(store.dockBottomGap, 0)
+        store.setDockBottomGap(100)
+        XCTAssertEqual(store.dockBottomGap, 20)
+        defaults.set(32, forKey: "com.tungsten.edge.dockBottomGap")
+        XCTAssertEqual(AppSettingsStore(defaults: defaults).dockBottomGap, 20)
+        store.setDockBottomGap(store.dockBottomGap - 1)
+        XCTAssertEqual(store.dockBottomGap, 19)
+        store.setDockBottomGap(store.dockBottomGap + 1)
+        XCTAssertEqual(store.dockBottomGap, 20)
+        store.setDockBottomGap(6.6)
+        XCTAssertEqual(store.dockBottomGap, 7)
+        store.setDockBottomGap(.nan)
+        XCTAssertEqual(store.dockBottomGap, 8)
+        XCTAssertEqual(AppSettingsStore(defaults: defaults).dockBottomGap, 8)
+    }
+
+    func testHoverMagnificationDefaultsOnAndPersistsIndependentlyOfNames() {
+        let defaults = makeDefaults()
+        let store = AppSettingsStore(defaults: defaults)
+        XCTAssertTrue(store.hoverMagnificationEnabled)
+        store.setHoverMagnificationEnabled(false)
+        store.setHoverStyle(.standard)
+        let reloaded = AppSettingsStore(defaults: defaults)
+        XCTAssertFalse(reloaded.hoverMagnificationEnabled)
+        XCTAssertEqual(reloaded.hoverStyle, .standard)
+        reloaded.setHoverStyle(.quiet)
+        XCTAssertFalse(reloaded.hoverMagnificationEnabled)
+        reloaded.setHoverMagnificationEnabled(true)
+        XCTAssertTrue(AppSettingsStore(defaults: defaults).hoverMagnificationEnabled)
+        XCTAssertEqual(reloaded.hoverStyle, .quiet)
+    }
+
     func testTrashDefaultsIgnoreLegacyKeyAndPersistIndependently() {
         let defaults = makeDefaults()
         defaults.set(false, forKey: "com.tungsten.edge.trash.visible")
@@ -565,8 +719,8 @@ final class AppSettingsStoreTests: XCTestCase {
         var state = PanelVisibilityState()
 
         XCTAssertTrue(EdgeAutoHideRuntimeRules.canArmIdleHide(state: state, delay: 0.9))
-        XCTAssertEqual(EdgeAutoHideRuntimeRules.idleHideInterval(for: 0.9), EdgeAutoHideRuntimeRules.fixedIdleHideDelay)
-        XCTAssertEqual(EdgeAutoHideRuntimeRules.idleHideInterval(for: AppSettingsStore.neverWakeDelay), EdgeAutoHideRuntimeRules.fixedIdleHideDelay)
+        XCTAssertEqual(EdgeAutoHideRuntimeRules.idleHideInterval(for: 0.9), 0)
+        XCTAssertEqual(EdgeAutoHideRuntimeRules.idleHideInterval(for: AppSettingsStore.neverWakeDelay), 0)
         XCTAssertNil(EdgeAutoHideRuntimeRules.idleHideInterval(for: AppSettingsStore.neverHideDelay))
 
         state.setEdgeAutoHidden(true)

@@ -104,6 +104,18 @@ final class AppMembershipController: ObservableObject {
 
 /// Defensive, side-effect-free projections used by the strip, drawer, and capsule.
 enum AppMembershipProjection {
+    /// Window inventory can temporarily omit an app or intentionally exclude its last
+    /// window. Process liveness still warrants an app-level entry until it quits.
+    static func missingRunningAppIDs(
+        runningIDs: Set<String>, representedIDs: Set<String>, keptIDs: [String],
+        messagingIDs: [String], drawerIDs: [String], excludedIDs: Set<String>
+    ) -> [String] {
+        let excluded = representedIDs.union(keptIDs).union(messagingIDs).union(drawerIDs).union(excludedIDs)
+        // This is only the admission order of unknown apps. StripOrderStore restores
+        // known positions and appends new entries without reordering existing ones.
+        return runningIDs.subtracting(excluded).filter { !$0.isEmpty }.sorted()
+    }
+
     /// Full placement list. Hidden members remain here so their drawer order is
     /// stable when a later launch makes them visible again.
     static func drawerMembers(drawerIDs: [String]) -> [String] {

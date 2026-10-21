@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// Taskbar height as the user dragged it: whole points, clamped to `minimum...maximum`.
 ///
@@ -334,6 +335,20 @@ struct PanelScreenGeometry: Equatable {
 }
 
 enum PanelGeometry {
+    /// The reveal path must stay interactive from the screen edge through the moving
+    /// plate to its destination. Only the bar/capsule width gets this bottom corridor.
+    static func dockInteractiveFrame(restingDock: CGRect, presentedDock: CGRect,
+                                     restingCapsule: CGRect?, presentedCapsule: CGRect?,
+                                     shadowPadding: CGFloat, screenBottom: CGFloat) -> CGRect {
+        var plate = restingDock.insetBy(dx: shadowPadding, dy: shadowPadding)
+            .union(presentedDock.insetBy(dx: shadowPadding, dy: shadowPadding))
+        for frame in [restingCapsule, presentedCapsule].compactMap({ $0 }) {
+            plate = plate.union(frame.insetBy(dx: shadowPadding, dy: shadowPadding))
+        }
+        return CGRect(x: plate.minX, y: screenBottom, width: plate.width,
+                      height: max(0, plate.maxY - screenBottom))
+    }
+
     static let windowTitleTooltipScreenMargin: CGFloat = 8
     /// 阴影留白**不随档位缩放**：气泡的阴影 token 本身是固定的，跟着缩会动到定稿的观感。
     /// 视图侧和这里必须用同一个值（视图 `.padding(它)`，这里再减回去）。
@@ -536,5 +551,87 @@ enum PanelGeometry {
     /// capsule's top, i.e. the bar's top edge. `plate` is `folderPopupPlateFrame` of the drawer.
     static func drawerBodyFloorY(plate: CGRect) -> CGFloat {
         plate.minY - StackPopupMetrics.tipGap
+    }
+}
+
+/// A critically damped spring: settle without overshooting or bouncing. Retarget
+/// using current position AND velocity so rapid wake/hide reversals stay continuous.
+struct DockVisibilitySpring {
+    struct Sample { var position: CGFloat; var velocity: CGFloat }
+    let start: Sample
+    let target: CGFloat
+    static let frequency: Double = 32
+
+    func sample(at elapsed: TimeInterval) -> Sample {
+        let t = max(0, elapsed)
+        let a = Double(start.position - target)
+        let b = Double(start.velocity) + Self.frequency * a
+        let envelope = exp(-Self.frequency * t)
+        let displacement = a + b * t
+        return Sample(position: target + CGFloat(envelope * displacement),
+                      velocity: CGFloat(envelope * (b - Self.frequency * displacement)))
+    }
+
+    func isSettled(at elapsed: TimeInterval) -> Bool {
+        let value = sample(at: elapsed)
+        // AppKit quantizes window origins to points. Chasing the sub-point spring
+        // tail holds the last visible position, then jumps when the flight is detached.
+        // Finish within one positioning unit while all surfaces are still grouped.
+        return abs(value.position - target) < 1 && abs(value.velocity) < Self.frequency || elapsed >= 1
+    }
+}
+
+/// Callback timing, not GPU-presented FPS. Kept in memory and logged once per flight.
+struct DockAnimationTiming {
+    private var previousCallback: TimeInterval?
+    private(set) var frameCount = 0
+    private(set) var totalGap: TimeInterval = 0
+    private(set) var maximumGap: TimeInterval = 0
+    private(set) var maximumWork: TimeInterval = 0
+    private(set) var missedCallbacks = 0
+
+    mutating func record(at now: TimeInterval, expectedInterval: TimeInterval, work: TimeInterval) {
+        if let previousCallback {
+            let gap = max(0, now - previousCallback)
+            totalGap += gap
+            maximumGap = max(maximumGap, gap)
+            if expectedInterval > 0, gap > expectedInterval * 1.5 {
+                missedCallbacks += max(0, Int((gap / expectedInterval).rounded()) - 1)
+            }
+        }
+        previousCallback = now
+        frameCount += 1
+        maximumWork = max(maximumWork, work)
+    }
+
+    var callbackFPS: Double { totalGap > 0 ? Double(frameCount - 1) / totalGap : 0 }
+}
+
+/// A new flight starts on its first display callback, after all synchronous caller work.
+/// A reversal continues from the last submitted presentation instead of rewinding time.
+struct DockVisibilityTimeline {
+    private var startTime: TimeInterval = 0
+    private var sampleTime: TimeInterval = 0
+    private var awaitingFirstFrame = false
+
+    var elapsedAtLastFrame: TimeInterval { max(0, sampleTime - startTime) }
+
+    mutating func prepare(at now: TimeInterval, waitsForFirstFrame: Bool) {
+        // Input may reverse the flight again before callback 1. Keep waiting rather
+        // than accidentally charging that first callback's delay to the new direction.
+        let wait = waitsForFirstFrame || awaitingFirstFrame
+        let origin = wait ? now : max(now, sampleTime)
+        startTime = origin
+        sampleTime = origin
+        awaitingFirstFrame = wait
+    }
+
+    mutating func advance(to frameTime: TimeInterval) -> TimeInterval {
+        if awaitingFirstFrame {
+            startTime = frameTime
+            awaitingFirstFrame = false
+        }
+        sampleTime = max(startTime, frameTime)
+        return elapsedAtLastFrame
     }
 }

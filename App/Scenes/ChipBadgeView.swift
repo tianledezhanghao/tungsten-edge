@@ -1,11 +1,12 @@
 import AppKit
+import CoreText
 import OSLog
 import SwiftUI
 import UniformTypeIdentifiers
 
 // MARK: - Chip Badge
 
-/// Classic Dock-style unread badge: red capsule, white text, top-right of the chip.
+/// Compact unread badge: restrained red capsule, small white numerals, top-right of the chip.
 /// Renders whatever string the app put on its Dock tile ("3", "99+", "•") as-is.
 /// Not a hit target — taps fall through to the chip underneath.
 ///
@@ -14,29 +15,48 @@ import UniformTypeIdentifiers
 /// **外面**：安静档悬停时图标放大 10%，红点纹丝不动（owner 实测两帧都是 16×15pt），
 /// 看着像图标从红点底下鼓出来。放进 chip 里之后，悬停放大、按压回缩、档位缩放它全都跟着走。
 ///
-/// 尺寸常量在 `ChipPillMetrics.badge*`，中档与历史字面值逐字相同。
+/// Sizes follow `ChipPillMetrics.badge*` and the taskbar scale.
 struct ChipBadgeView: View {
     let text: String
     /// 档位系数。**故意不给默认值**——同 `scale` / `hoverStyle` 那条铁律。
     let scale: CGFloat
 
     var body: some View {
-        Text(text)
-            .font(.system(size: ChipPillMetrics.badgeFontSize * scale, weight: .bold, design: .rounded))
-            .foregroundStyle(.white)
-            .lineLimit(1)
-            .padding(.horizontal, ChipPillMetrics.badgeHorizontalPadding * scale)
-            .frame(minWidth: ChipPillMetrics.badgeMinimumSize * scale,
-                   minHeight: ChipPillMetrics.badgeMinimumSize * scale)
+        let font = NSFont.monospacedDigitSystemFont(
+            ofSize: ChipPillMetrics.badgeFontSize * scale, weight: .regular
+        )
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: text, attributes: [.font: font, .foregroundColor: NSColor.white]
+        ))
+        let inkBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        let width = max(
+            ChipPillMetrics.badgeMinimumSize * scale,
+            ceil(CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+                 + 2 * ChipPillMetrics.badgeHorizontalPadding * scale)
+        )
+
+        // Center the visible glyphs rather than the font's line box and side bearings.
+        // This also handles other digits, multi-digit counts and symbols without a fixed nudge.
+        Canvas { context, size in
+            context.withCGContext { cg in
+                cg.translateBy(x: size.width / 2 - inkBounds.midX,
+                               y: size.height / 2 + inkBounds.midY)
+                cg.scaleBy(x: 1, y: -1)
+                cg.textMatrix = .identity
+                cg.textPosition = .zero
+                CTLineDraw(line, cg)
+            }
+        }
+            .frame(width: width, height: ChipPillMetrics.badgeMinimumSize * scale)
+            .accessibilityLabel(Text(text))
             .background(
-                Capsule().fill(Color(red: 1.0, green: 0.23, blue: 0.19))   // Apple badge red
+                Capsule().fill(Color(red: 0.96, green: 0.23, blue: 0.27))
             )
             .overlay(
-                // 0.5pt 是发丝线，和分隔线同理，不随档位缩放。
-                Capsule().strokeBorder(.black.opacity(0.25), lineWidth: 0.5)
+                Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
             )
-            // 原生的角标大部分压在图标上，只稍稍探出圆角：卡片 40×54、可见图标方块 32.5，
-            // 这个下推量让角标中心正好落在图标右上角内侧。
+            .shadow(color: .black.opacity(0.12), radius: 1 * scale, x: 0, y: 0.5 * scale)
+            // Tuck into the icon's upper-right corner without a heavy black outline.
             .offset(x: 0, y: ChipPillMetrics.badgeTopOffset * scale)
             .allowsHitTesting(false)
     }

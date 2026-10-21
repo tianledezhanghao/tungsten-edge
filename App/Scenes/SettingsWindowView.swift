@@ -11,6 +11,7 @@ struct SettingsWindowView: View {
     static let repositoryURL = URL(string: "https://github.com/moonbai-studio/tungsten-edge")!
 
     @ObservedObject var store: AppSettingsStore
+    @ObservedObject var messagingStore: MessagingAppStore
     @ObservedObject var coordinator: SettingsCoordinator
     @ObservedObject var licenseStore: LicenseStore
     @ObservedObject var tabState: SettingsTabState
@@ -26,6 +27,7 @@ struct SettingsWindowView: View {
         ScrollView(.vertical, showsIndicators: false) {
             SettingsWindowContent(
                 store: store,
+                messagingStore: messagingStore,
                 coordinator: coordinator,
                 licenseStore: licenseStore,
                 tabState: tabState,
@@ -39,6 +41,7 @@ struct SettingsWindowView: View {
 
 struct SettingsWindowContent: View {
     @ObservedObject var store: AppSettingsStore
+    @ObservedObject var messagingStore: MessagingAppStore
     @ObservedObject var coordinator: SettingsCoordinator
     @ObservedObject var licenseStore: LicenseStore
     @ObservedObject var tabState: SettingsTabState
@@ -107,6 +110,13 @@ struct SettingsWindowContent: View {
                         Spacer(minLength: 12)
                         appearanceCards
                     }
+                    glassBackgroundPicker
+                    dockBottomGapControl
+                    runningIndicatorToggle
+                    clickScaleToggle
+                    hoverMagnificationToggle
+                    messagingZoneToggle
+                    drawerToggle
                     if Self.showsFrontWindowBarToggle {
                         frontWindowBarToggle
                             .toggleStyle(.switch)
@@ -144,6 +154,14 @@ struct SettingsWindowContent: View {
                     } control: {
                         appearanceCards
                     }
+                    Divider().opacity(0.5)
+                    glassBackgroundPicker
+                    dockBottomGapControl
+                    runningIndicatorToggle
+                    clickScaleToggle
+                    hoverMagnificationToggle
+                    messagingZoneToggle
+                    drawerToggle
                     if Self.showsFrontWindowBarToggle {
                         Divider().opacity(0.5)
                         groupRow {
@@ -427,15 +445,27 @@ struct SettingsWindowContent: View {
         )
     }
 
-    /// 分离一个「睡半秒再 open」的壳进程后自退。新实例启动时旧的已退干净，
-    /// `terminateOtherInstances()` 不会反杀谁。环境无需再清——本进程入口处
-    /// `ProcessEnvironmentScrub.apply()` 已经清过，子进程继承的就是干净环境。
-    private static func relaunch() {
+    /// Wait for this process to finish normal termination (including window restoration),
+    /// then reopen this exact bundle. Arguments carry paths safely, even with spaces.
+    static func relaunch() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 0.5; /usr/bin/open \"$0\"", Bundle.main.bundleURL.path]
-        try? process.run()
-        NSApp.terminate(nil)
+        process.arguments = ["-c", """
+            attempts=0
+            while /bin/kill -0 "$2" 2>/dev/null; do
+                attempts=$((attempts + 1))
+                [ "$attempts" -lt 300 ] || exit 1
+                /bin/sleep 0.1
+            done
+            exec /usr/bin/open -n "$1"
+            """, "tungsten-restart", Bundle.main.bundleURL.path, String(ProcessInfo.processInfo.processIdentifier)]
+        do {
+            try process.run()
+            NSApp.terminate(nil)
+        } catch {
+            // A failed helper launch must leave the current app running.
+            NSAlert(error: error).runModal()
+        }
     }
 
     /// 显隐任务条快捷键：录制框 + 自定义过才出现的「恢复默认」。行高恒定
@@ -459,6 +489,69 @@ struct SettingsWindowContent: View {
                 }
             )
             .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private var glassBackgroundPicker: some View {
+        if #available(macOS 26.0, *) {
+            Picker("Taskbar background", selection: Binding(
+                get: { store.dockBackgroundStyle },
+                set: { store.setDockBackgroundStyle($0) }
+            )) {
+                Text("Classic glass").tag(DockBackgroundStyle.classic)
+                Text("Private variant 3").tag(DockBackgroundStyle.variant3)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var drawerToggle: some View {
+        Toggle("Show drawer", isOn: Binding(
+            get: { store.showDrawer },
+            set: { store.setShowDrawer($0) }
+        ))
+    }
+
+    private var messagingZoneToggle: some View {
+        Toggle("Pin messaging apps on the left", isOn: Binding(
+            get: { messagingStore.zoneEnabled },
+            set: { messagingStore.setZoneEnabled($0) }
+        ))
+        .help(Text("Turn off to show these apps in the regular window area. Saved pins and notification badges are preserved."))
+    }
+
+    private var runningIndicatorToggle: some View {
+        Toggle("Show running app indicators", isOn: Binding(
+            get: { store.showRunningIndicators },
+            set: { store.setShowRunningIndicators($0) }
+        ))
+    }
+
+    private var clickScaleToggle: some View {
+        Toggle("Scale taskbar icons when clicked", isOn: Binding(
+            get: { store.clickScaleEnabled },
+            set: { store.setClickScaleEnabled($0) }
+        ))
+    }
+
+    private var hoverMagnificationToggle: some View {
+        Toggle("Magnify taskbar icons on hover", isOn: Binding(
+            get: { store.hoverMagnificationEnabled },
+            set: { store.setHoverMagnificationEnabled($0) }
+        ))
+    }
+
+    private var dockBottomGapControl: some View {
+        HStack {
+            Text("Taskbar bottom spacing")
+            Spacer(minLength: 12)
+            DockBottomGapControl(
+                value: Binding(get: { store.dockBottomGap }, set: { store.setDockBottomGap($0) }),
+                range: AppSettingsStore.dockBottomGapRange
+            )
+            .frame(width: DockBottomGapControlView.controlSize.width,
+                   height: DockBottomGapControlView.controlSize.height)
         }
     }
 

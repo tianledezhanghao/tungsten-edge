@@ -16,6 +16,7 @@ import SwiftUI
 /// **拖回任务条**方向仍然一律不动 kept。转换预览与回滚阶段也一律不碰 kept，只有 `endDrag()`
 /// 落定那一刻才写。判据与完整语义见 `DragConversionPlan.enablesKeptOnDrop`。
 struct DrawerView: View {
+    @EnvironmentObject var settingsStore: AppSettingsStore
     /// Rows and columns the grid may take above the capsule on this screen; past them it scrolls
     /// inside the plate. The coordinator swaps the root view when they change.
     let limits: StackGridLayout.Limits
@@ -402,6 +403,7 @@ struct DrawerView: View {
                      hoverSuppressed: isHoverSuppressed(id),
                      onLaunch: { runtime.beginLaunch(id) },
                      onPrimaryAction: onPrimaryAction)
+            .environment(\.dockClickScaleEnabled, settingsStore.clickScaleEnabled)
             .environment(\.colorScheme, .dark)
     }
 
@@ -428,7 +430,8 @@ struct DrawerView: View {
             : ChipPillMetrics.quietHoverScale(forCardWidth: width, scale: 1.9)
         return DragCarrierGeometry.pickUpPose(
             chipHeight: height,
-            pressedScale: ChipPressSwitches.pressDownEnabled ? ChipPressDecision.pressedScale : nil,
+            pressedScale: settingsStore.clickScaleEnabled && ChipPressSwitches.pressDownEnabled
+                ? ChipPressDecision.pressedScale : nil,
             hoverScale: hoverScale)
     }
 
@@ -651,6 +654,7 @@ final class DrawerShowingModel: ObservableObject {
 /// 宿主只建一次、之后每次打开只换 `rootView`（2026-09-04，抽屉弹开掉帧的修法），而
 /// `DrawerView(...).environmentObject(...)` 链出来的是写不出名字的 `ModifiedContent<…>`。
 struct DrawerRootView: View {
+    @ObservedObject var settingsStore: AppSettingsStore
     let limits: StackGridLayout.Limits
     let arrow: StackPopupArrowModel
     let showing: DrawerShowingModel
@@ -684,6 +688,6 @@ struct DrawerRootView: View {
             .environmentObject(runtime).environmentObject(drawerStore).environmentObject(messagingStore)
             .environmentObject(drawerOrderStore).environmentObject(dragController)
             .environmentObject(keptAppStore).environmentObject(runningApplicationStore)
-            .environmentObject(appMembershipController)
+            .environmentObject(appMembershipController).environmentObject(settingsStore)
     }
 }

@@ -12,6 +12,14 @@ enum ChipPressDecision {
     /// 按下时的缩放。与改动前的 `isTapPressed ? 0.93 : 1.0` 完全一致，刻意不动。
     static let pressedScale: CGFloat = 0.93
 
+    /// The shared gate also covers the AppKit drag carrier, outside SwiftUI's environment.
+    static func scale(isPressed: Bool, enabled: Bool, restingScale: CGFloat = 1) -> CGFloat {
+        isPressed && enabled ? pressedScale : restingScale
+    }
+
+    static let flashBrightness: Double = -0.18
+    static let flashHold: TimeInterval = 0.07
+
     /// 抬起后仍要保持按下态的最短时长。一次极快的点击（按下到抬起只有几毫秒）如果立刻弹回，
     /// 那一下缩放根本看不见——这就是旧实现里那个 90ms 定时器的本意，原样保留。
     static let minimumHold: TimeInterval = 0.09
@@ -53,13 +61,12 @@ enum ChipPressAnimation {
 // MARK: - 视图接入
 
 extension View {
-    /// 只做视觉：按压缩放 + 两条边各自的曲线。
+    /// 按压反馈：开启时缩放，关闭时短暂变暗，保持几何尺寸。
     ///
     /// 和手势**分成两个修饰器**是刻意的：抽屉胶囊的按压只作用在里面的四宫格上、外框保持静止
     /// （owner 2026-06-21 定），所以缩放和手势必须能挂在不同层级。
     func chipPressScale(_ isPressed: Bool) -> some View {
-        scaleEffect(isPressed ? ChipPressDecision.pressedScale : 1.0)
-            .animation(isPressed ? ChipPressAnimation.down : ChipPressAnimation.up, value: isPressed)
+        modifier(ChipPressScaleModifier(isPressed: isPressed))
     }
 
     /// 只驱动状态，不改任何几何。放在 `.contentShape(...)` **之后**，让按压的命中区域
@@ -86,7 +93,46 @@ extension View {
     }
 }
 
+private struct ChipPressScaleModifier: ViewModifier {
+    @Environment(\.dockClickScaleEnabled) private var enabled
+    let isPressed: Bool
+    @State private var flashActive = false
+    @State private var flashTask: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        let pressed = enabled && isPressed
+        content
+            .scaleEffect(ChipPressDecision.scale(isPressed: isPressed, enabled: enabled))
+            .animation(enabled ? (pressed ? ChipPressAnimation.down : ChipPressAnimation.up) : nil,
+                       value: pressed)
+            .brightness(!enabled && flashActive ? ChipPressDecision.flashBrightness : 0)
+            .animation(.easeOut(duration: flashActive ? 0.025 : 0.07), value: flashActive)
+            .onChange(of: isPressed) { value in
+                guard value, !enabled else { return }
+                flashTask?.cancel()
+                flashActive = true
+                flashTask = Task { @MainActor in
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(ChipPressDecision.flashHold * 1_000_000_000))
+                    } catch { return }
+                    guard !Task.isCancelled else { return }
+                    flashActive = false
+                    flashTask = nil
+                }
+            }
+            .onChange(of: enabled) { _ in resetFlash() }
+            .onDisappear { resetFlash() }
+    }
+
+    private func resetFlash() {
+        flashTask?.cancel()
+        flashTask = nil
+        flashActive = false
+    }
+}
+
 private struct ChipPressGestureModifier: ViewModifier {
+    @Environment(\.dockClickScaleEnabled) private var scaleEnabled
     @Binding var isPressed: Bool
     let pulseNonce: Int
     let isEnabled: Bool
@@ -117,6 +163,18 @@ private struct ChipPressGestureModifier: ViewModifier {
             .onChange(of: pulseNonce) { _ in
                 guard isEnabled else { return }
                 firePulse()
+            }
+            .onChange(of: scaleEnabled) { _ in
+                cancelPending()
+                pressedAt = nil
+                setPressed(false)
+            }
+            .onChange(of: isEnabled) { enabled in
+                if !enabled {
+                    cancelPending()
+                    pressedAt = nil
+                    setPressed(false)
+                }
             }
             .onDisappear {
                 cancelPending()

@@ -896,12 +896,16 @@ final class DragController: ObservableObject {
     private var globalMonitor: Any?
     private var pollTimer: Timer?
 
+    private let clickScaleEnabledProvider: () -> Bool
+
     init(drawerStore: DrawerStore,
          messagingStore: MessagingAppStore,
          membershipController: AppMembershipController,
          dropZonesProvider: @escaping (DragSource) -> [CGRect],
          screensProvider: @escaping () -> [NSScreen],
-         stashTargetProvider: @escaping () -> CGRect? = { nil }) {
+         stashTargetProvider: @escaping () -> CGRect? = { nil },
+         clickScaleEnabledProvider: @escaping () -> Bool = { true }) {
+        self.clickScaleEnabledProvider = clickScaleEnabledProvider
         self.pointerMoves = pointerSubject.eraseToAnyPublisher()
         self.carrierClicks = carrierClickSubject.eraseToAnyPublisher()
         self.capsuleStashes = capsuleStashSubject.eraseToAnyPublisher()
@@ -1258,7 +1262,7 @@ final class DragController: ObservableObject {
         let action = DragConversionPlan.endAction(source: p.source,
                                                   isConvertedToStrip: converted,
                                                   isOverDropZone: external,
-                                                  isMessagingMember: messagingStore.contains(p.bundleID))
+                                                  isMessagingMember: messagingStore.isZoneMember(p.bundleID))
         // 跨屏投放（多屏 ③④）：松手时认领在**别的** strip 上（那条早在指针悬上去时就接管了：
         // 空槽、重排、落点锚点都是它的）→ 飞行照常飞向它报的槽位，窗口搬到那块屏。
         let crossStripDisplayUUID = crossStripDropDisplayUUID(for: p, external: external)
@@ -1427,7 +1431,7 @@ final class DragController: ObservableObject {
             return DragConversionPlan.endAction(source: .messaging,
                                                 isConvertedToStrip: isConvertedToStrip,
                                                 isOverDropZone: isOverDropZone,
-                                                isMessagingMember: messagingStore.contains(payload.bundleID))
+                                                isMessagingMember: messagingStore.isZoneMember(payload.bundleID))
                 == .stashMessagingChip
         case .drawer, .folder:
             return false
@@ -1780,7 +1784,9 @@ final class DragController: ObservableObject {
         // 同 `moveCarrier`：抬起之前载体保持「卡槽原样」（0.93），
         // 否则起拖当轮一次投放区判定就能把它提前拉到常态尺寸，抬起动画就成了半截。
         guard carrierLifted, let layer = carrierLayer, draggingPayload != nil else { return }
-        let scale = regrabPressed ? ChipPressDecision.pressedScale : carrierVisualScale
+        let scale = ChipPressDecision.scale(isPressed: regrabPressed,
+                                           enabled: clickScaleEnabledProvider(),
+                                           restingScale: carrierVisualScale)
         let opacity = carrierVisualOpacity
         CATransaction.begin()
         if animated {

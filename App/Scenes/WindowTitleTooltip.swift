@@ -181,18 +181,15 @@ enum ChipPillMetrics {
 
     // MARK: 未读角标（`ChipBadgeView`）
     //
-    // 中档 = 下面这组字面值，与 2026-08-17 之前逐字相同；其余档位整体乘 `scale`。
-    // 在此之前这几个数是写死的，**四个档位一样大**——70pt 的条上那颗红点偏小、46pt 上偏大。
-    // 和悬停气泡是同一类漏网（AGENTS《Taskbar Size Tiers》：条内每条渲染路径都要吃 `scale`）。
-    static let badgeFontSize: CGFloat = 10
-    /// 角标胶囊的最小尺寸（一位数时就是它）。
-    static let badgeMinimumSize: CGFloat = 16
-    static let badgeHorizontalPadding: CGFloat = 5
-    /// 从卡片右上角往下推的量：原生的角标大部分压在图标上，只稍微探出圆角。
-    static let badgeTopOffset: CGFloat = 5
-    /// 带标题的窗口卡上角标的缩放（相对图标卡的角标）。药丸里的图标槽只有 22pt，
-    /// 全尺寸 16pt 的角标会盖掉大半个图标；0.8 → 12.8pt，字号 8pt 仍可读。
-    static let titledCardBadgeScale: CGFloat = 0.8
+    // A compact badge at the native taskbar height; all dimensions scale with the bar.
+    static let badgeFontSize: CGFloat = 9
+    /// Fixed diameter for one digit; multiple digits expand horizontally into a capsule.
+    static let badgeMinimumSize: CGFloat = 14
+    static let badgeHorizontalPadding: CGFloat = 4
+    /// Keep the badge centered on the same upper-right corner as its size changes.
+    static let badgeTopOffset: CGFloat = 6
+    /// The compact badge already fits a titled card's 22pt icon. Keep its text readable.
+    static let titledCardBadgeScale: CGFloat = 1
 
     /// 药丸盒顶边到卡片顶边的距离：两个 `Spacer` 平分 `chipHeight - boxHeight`。
     static let boxTopInset: CGFloat = (chipHeight - boxHeight) / 2

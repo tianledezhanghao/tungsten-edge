@@ -208,11 +208,11 @@ struct DockStripView: View {
         // 任何一个 `@Published` 变化都会打翻整条。默认关，`DOCK_HOVER_TRACE=1` 才记。
         let _ = HoverTrace.stripBody(items: projection.entries.count, surface: stripSurfaceID)
         return ZStack {
-            // macOS 26 的 Liquid Glass 由统一底板接管；默认关闭，旧系统与未开关时仍是原毛玻璃。
             DockPanelBackdrop(theme: theme,
                               cornerRadius: taskbarCornerRadius,
                               usesLiquidGlass: usesLiquidGlass,
-                              matchesDockRefraction: true)
+                              matchesDockRefraction: true,
+                              usesRawVariant3: settingsStore.dockBackgroundStyle == .variant3)
 
             // 玻璃厚度感：材质之上、内容之下。**默认关**，`DOCK_PANEL_THICKNESS=1` 才开
             //（未验收的效果一律 opt-in，见 DockEffectSwitches）。深色则两层保险都不画，
@@ -259,6 +259,9 @@ struct DockStripView: View {
                 .onAppear { renderedLabelTitles = projection.labelTitleByChipID }
                 .environment(\.labelBoxWidthTick, onLabelBoxWidthTick)
                 .environment(\.chipPillUsesGlass, usesLiquidGlass)
+                .environment(\.dockHoverMagnificationEnabled, settingsStore.hoverMagnificationEnabled)
+                .environment(\.dockShowRunningIndicators, settingsStore.showRunningIndicators)
+                .environment(\.dockClickScaleEnabled, settingsStore.clickScaleEnabled)
             }
             .clipShape(RoundedRectangle(cornerRadius: taskbarCornerRadius, style: .continuous))
             .compatLeadingScrollAnchor()
@@ -307,7 +310,8 @@ struct DockStripView: View {
             cornerRadius: taskbarCornerRadius,
             style: theme.panelRimStyle(highlighted: false),
             lineWidth: theme.panelRimLineWidth(highlighted: false),
-            usesLiquidGlass: usesLiquidGlass
+            usesLiquidGlass: usesLiquidGlass,
+            usesRawVariant3: settingsStore.dockBackgroundStyle == .variant3
         )
         // 外部拖放悬停期冻住条宽（理由见 `frozenStripWidth`）。**必须在下面那层
         // `.coordinateSpace(name: "strip")` 之前**：坐标空间视图的宽度因此在整段悬停里恒定，
@@ -384,7 +388,7 @@ struct DockStripView: View {
         .dockShadow(theme.stripShadow,
                     visible: DockLiquidGlassConfiguration.stripShadowVisible(
                         usesLiquidGlass: usesLiquidGlass,
-                        usesSystemVariant: DockGlassPresentation.usesSystemVariant))
+                        usesSystemVariant: (settingsStore.dockBackgroundStyle == .variant3) || DockGlassPresentation.usesSystemVariant))
         .padding(PanelCoordinator.shadowPadding)
         // 抽屉图标拖到任务条上：进任务条区即转正成窗口卡、跟光标整块实时让位（镜像 DrawerView 的全局鼠标驱动）。
         // 消息区的重排/释放同样由全局鼠标驱动——重排会挪动被拖 chip,SwiftUI 会取消原手势,
@@ -463,7 +467,8 @@ struct DockStripView: View {
         }
         .onChange(of: projection.liveOrderIDs) { _ in reconcileLiveOrder(freshProjection()) }
         .onChange(of: keptAppStore.bundleIDs) { _ in reconcileLiveOrder(freshProjection()) }
-        .onChange(of: messagingStore.bundleIDs) { _ in reconcileLiveOrder(freshProjection()) }
+        .onChange(of: messagingStore.zoneEnabled) { _ in dragController.cancelDrag() }
+        .onChange(of: messagingStore.activeBundleIDs) { _ in reconcileLiveOrder(freshProjection()) }
         .onAppear { reconcileLiveOrder(projection) }
         // 卡帧变了就重报落点锚点。**光靠 `globalLocation` 驱动不够**：松手之后指针不再有事件，
         // 而让位弹簧还在跑，卡槽要再过一两百毫秒才停。归位飞行的中途纠偏就靠这条。
@@ -596,7 +601,7 @@ struct DockStripView: View {
                                  hasCarried: current.contains("app-\(p.bundleID)"))
         }
         stripOrderStore.sync(current: current, appKeyOf: appKeys,
-                             headPreferred: Set(messagingStore.bundleIDs),
+                             headPreferred: [],
                              projectionSample: sample)
         // 拖动中被拖窗口消失 → 取消拖动，免得空位卡死。(松手无回调那条由 DragController 的轮询兜底。)
         if let p = dragController.draggingPayload, p.source == .strip, !current.contains(p.id) {
@@ -642,7 +647,7 @@ struct DockStripView: View {
     private func currentDrawerDragOutMode(_ bid: String, projection: StripProjection) -> DrawerDragOutMode {
         DragConversionPlan.drawerDragOutMode(
             bundleID: bid,
-            isMessagingMember: messagingStore.contains(bid),
+            isMessagingMember: messagingStore.isZoneMember(bid),
             isInSnapshot: projection.snapshotBundleIDs.contains(bid),
             // 与消息区可见性同源（NSWorkspace 进程投影），**不是**窗口清单——理由见 `drawerDragOutMode`。
             isRunningProcess: runningApplicationStore.isRunning(bid),
@@ -777,6 +782,9 @@ struct DockStripView: View {
                 .environmentObject(runningApplicationStore)
                 .environmentObject(appMembershipController)
                 .environmentObject(settingsStore)
+                .environment(\.dockHoverMagnificationEnabled, settingsStore.hoverMagnificationEnabled)
+                .environment(\.dockShowRunningIndicators, settingsStore.showRunningIndicators)
+                .environment(\.dockClickScaleEnabled, settingsStore.clickScaleEnabled)
                 .environmentObject(badgeStore)
                 .environmentObject(pinnedFolderStore)
                 .environmentObject(folderCoverStore),
@@ -794,17 +802,18 @@ struct DockStripView: View {
         switch entry {
         case .window, .messagingApp, .keptApp:
             let width = slot?.width ?? ChipPillMetrics.cardWidth * dockScale
-            let hoverScale: CGFloat? = hoverStyle.showsQuietHoverFeedback(isHovering: hovered)
+            let hoverScale: CGFloat? = settingsStore.hoverMagnificationEnabled && hoverStyle.showsQuietHoverFeedback(isHovering: hovered)
                 ? ChipPillMetrics.quietHoverScale(forCardWidth: width, scale: dockScale)
                 : nil
             return DragCarrierGeometry.pickUpPose(
                 chipHeight: height,
-                pressedScale: ChipPressSwitches.pressDownEnabled ? ChipPressDecision.pressedScale : nil,
+                pressedScale: settingsStore.clickScaleEnabled && ChipPressSwitches.pressDownEnabled
+                    ? ChipPressDecision.pressedScale : nil,
                 hoverScale: hoverScale)
         case .pinnedFolder:
             // Folder chips hover like icon cards (quiet tier only) but have no press feedback.
             let width = slot?.width ?? ChipPillMetrics.cardWidth * dockScale
-            let hoverScale: CGFloat? = hoverStyle.showsQuietHoverFeedback(isHovering: hovered)
+            let hoverScale: CGFloat? = settingsStore.hoverMagnificationEnabled && hoverStyle.showsQuietHoverFeedback(isHovering: hovered)
                 ? ChipPillMetrics.quietHoverScale(forCardWidth: width, scale: dockScale)
                 : nil
             return DragCarrierGeometry.pickUpPose(chipHeight: height, pressedScale: nil,
@@ -962,7 +971,7 @@ struct DockStripView: View {
         // 每 tick 都记 `d2s`，上一轮正是靠它一次定因）。逐条 guard 记下卡在哪里。
         guard let p = dc.draggingPayload, p.source == .drawer, p.canExternalDrop else { return }
         // 只有消息成员才记：普通应用每 tick 都记会把日志淹掉（它们本来就该走 unstash，有 `d2s`）。
-        let isMessagingMember = messagingStore.contains(p.bundleID)
+        let isMessagingMember = messagingStore.isZoneMember(p.bundleID)
         func trace(_ stop: String, pt: CGPoint? = nil, zone: CGRect? = nil,
                    fallback: Bool = false, mode: String = "-", inZone: Bool = false) {
             HoverTrace.drawerToMessaging(

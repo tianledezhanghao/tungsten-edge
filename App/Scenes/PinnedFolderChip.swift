@@ -129,6 +129,7 @@ struct PinnedFolderChip: View {
         .chipQuietHoverScale(quietHoverFeedback,
                              cardWidth: ChipPillMetrics.cardWidth * scale,
                              scale: scale)
+        .modifier(FolderClickFeedback(isPressed: isPressed))
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
         // After the tap, as on the other chips: attached before it, it takes the click.
@@ -271,5 +272,15 @@ struct PinnedFolderChip: View {
         let header = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         header.isEnabled = false
         return header
+    }
+}
+
+/// Folder icons retain their original lack of press scaling, and share the alternate flash.
+private struct FolderClickFeedback: ViewModifier {
+    @Environment(\.dockClickScaleEnabled) private var scaleEnabled
+    let isPressed: Bool
+
+    func body(content: Content) -> some View {
+        content.chipPressScale(!scaleEnabled && isPressed)
     }
 }

@@ -1,25 +1,17 @@
 import Foundation
 
-/// 任务条拖动重排 · A 路线（会话内防打乱）的**显示顺序状态层**，只管主任务条的
-/// **实时窗口区**（live zone）。持有一串 chip id 的顺序；每次渲染用 `reconciled(current:)`
-/// 与「当前还活着的 chip」对账（已有保序、新窗口进末尾、真关闭丢弃），拖动用 `move` 改顺序。
-///
-/// 边界：消息固定区的顺序归 `MessagingAppStore` 自己管，本 store **只管 live 区、绝不跨界**。
-/// 排序原语在 `StripOrdering`（`UI/ReadModel/StripItem.swift`），本类只是它的有状态壳。
-///
-/// 落盘分两层，**不做**仿 Dock 的跨关闭布局恢复：
-/// - **同一开机周期**（`stripLiveOrder` + `stripLiveOrderBootTime`）：精确 chip 顺序，主键是
-///   `tabgrp-*` 稳定座位 token + kept 应用的 `app-*`。开机时间变了（=重启过机器，cgWindowID
-///   会重排/复用）这份整份不认，**跨开机绝不接管任何 chip id**。
-/// - **跨机器重启**（`stripKeptAppOrderV1`）：只存普通 kept 应用的 bundleID 排名。它不是
-///   「冷启动重排一次」的模式，而是喂给 `StripOrdering.reconcile` 的一条**常驻落位规则**——
-///   无位置记忆的卡按名次落位，晚到的窗口一样适用（理由见 `stableKeptRanks` 与 AGENTS）。
-///
-/// 消息区和抽屉的顺序仍归各自的 order store，本类只管 live 区、绝不跨界。
+/// User-controlled live-zone order. Missing seats retain their positions for the
+/// entire boot session; bundle-ID ranks persist across boots. Observation updates
+/// may add new seats but never discard a remembered position on a timeout.
+/// Messaging/folder/drawer zones keep their own explicit user orders.
 @MainActor
 final class StripOrderStore: ObservableObject {
     @Published private(set) var liveOrder: [String] = []
     @Published private(set) var stableKeptAppOrder: [String] = []
+
+    private var stableAppOrder: [String] = []
+    private let stableAppOrderKey = "stripAppOrderV2"
+    private let appKeysKey = "stripLiveAppKeysV2"
 
     private let orderKey = "stripLiveOrder"
     private let bootKey = "stripLiveOrderBootTime"
@@ -27,25 +19,28 @@ final class StripOrderStore: ObservableObject {
     /// 本次开机时间（秒）。开机周期内不变，缓存一次即可。
     private let bootTime: Int
 
-    /// 位置记忆粘性（slice ①）。一个 chip id 从当前快照里**短暂消失**时（Safari 偶发 AX 漏读、
-    /// 标签组锚点迁移等），不立刻把它从记忆顺序里删掉——记下消失时刻，grace 内仍当它「在场」
-    /// 保住 rank，只是显示层不渲染它（`reconciled` 用真实 current 过滤）。超过 grace 仍没返场
-    /// 才真丢弃。这样闪断回来的卡接回原位，而不是被当新卡甩到同 app 同伴右边。
-    private var absentSince: [String: Date] = [:]
-    private static let rankRetentionGrace: TimeInterval = 5.0
+    // Absent window seats remain in memory, but reconciled() only renders current IDs.
+    // Never reuse their raw IDs across boots; stableAppOrder carries bundle-ID slots instead.
 
     /// 粘性 id→appKey 记忆。窗口消失后 appKeyOf 映射即丢，占位 app-* 会因找不到同伴跳尾。
-    /// 每次 sync 合并传入的 appKeyOf；淘汰时机 = sync 尾部、liveOrder 更新之后，只保留
-    /// current ∪ liveOrder 内的键——宽限中的 id 仍在 liveOrder 里，键不会被误删。
+    /// 每次 sync 合并，并与同一开机周期的位置记忆一起持久化。
     private var stickyAppKeys: [String: String] = [:]
 
     /// 抽屉拖回任务条·精确落点的**外部块暂存**。转正那帧窗口卡还没进 live 区（`drawerStore.remove`
     /// 要下一轮才放回），拿不到卡 id；故只记 `bundleID + 目标`，卡 id 在下一次 `sync` 里用 `appKeyOf`
     /// 现解析、`movingBlock` 落子，解析出的 id 回填 `boundIDs` 供撤销精确清除。
-    private var externalBlock: (bundleID: String, target: String?, after: Bool, boundIDs: [String])?
+    private struct ExternalBlock {
+        var bundleID: String
+        var target: String?
+        var after: Bool
+        var boundIDs: [String]
+        var originalOrder: [String]
+        var originalAppOrder: [String]
+    }
+    private var externalBlock: ExternalBlock?
+    private var currentIDs: Set<String> = []
 
     private let defaults: UserDefaults
-    private let now: () -> Date
     private let keptIDsProvider: () -> Set<String>
     private let stableKeptOrderProvider: () -> [String]
     private let inventoryLog: WindowInventoryAnomalyLog
@@ -62,7 +57,6 @@ final class StripOrderStore: ObservableObject {
          bootTimeProvider: () -> Int = StripOrderStore.bootTimeSeconds,
          inventoryLog: WindowInventoryAnomalyLog = WindowInventoryAnomalyLog()) {
         self.defaults = defaults
-        self.now = now
         self.keptIDsProvider = keptIDsProvider
         self.stableKeptOrderProvider = stableKeptOrderProvider ?? { Array(keptIDsProvider()).sorted() }
         self.inventoryLog = inventoryLog
@@ -92,36 +86,31 @@ final class StripOrderStore: ObservableObject {
            defaults.integer(forKey: bootKey) == bootTime,
            let saved = defaults.stringArray(forKey: orderKey) {
             liveOrder = saved
+            stickyAppKeys = defaults.dictionary(forKey: appKeysKey) as? [String: String] ?? [:]
         }
+        stableAppOrder = defaults.stringArray(forKey: stableAppOrderKey)
+            ?? (liveOrder.isEmpty ? stableKeptAppOrder : [])
+        backfillPlaceholderAppKeys(&stickyAppKeys, ids: liveOrder)
     }
 
-    /// 跨重启排名（appKey → 名次）。喂给 `StripOrdering`，让**无记忆**的 kept 应用卡按名次落位。
-    /// 这不是「冷启动一次性模式」：开机时任务条比多数应用先起来（AppTracker 还有四轮补扫），
-    /// 晚到的窗口必须走同一条规则，否则那些应用永远拿不到排名、只能落末尾。
+    /// App-level slots survive boots, including ordinary apps without keep enabled.
+    /// The legacy kept ranks seed users who have not yet recorded the full app order.
     private var stableKeptRanks: [String: Int] {
-        let eligible = Set(stableKeptOrderProvider())
         var ranks: [String: Int] = [:]
-        for appKey in stableKeptAppOrder where eligible.contains(appKey) {
+        for appKey in stableAppOrder + stableKeptAppOrder where ranks[appKey] == nil {
             ranks[appKey] = ranks.count
         }
         return ranks
     }
 
-    /// 显示顺序 = 记住的顺序与当前活着的 chip id 对账后的结果（不改自身状态，可在 body 里读）。
-    /// `appKeyOf`（chip id → 所属 app 键）让新窗口插到同 app 同伴旁，而非任务条最右。
-    /// 粘性 appKey 在此处非破坏合并：传入的优先，记忆的兜底。
-    ///
-    /// **纯读，绝不写 `absentSince`**（body 求值期禁副作用）：本帧缺席 anchor 由 `absentRankAnchors`
-    /// 从 `liveOrder` + 只读 `absentSince` + 当前时间现算，与 `sync` 共用同一套计算。渲染发生在
-    /// `sync` 打戳之前，此刻刚缺席的旧条目 `absentSince` 还是 nil，`absentRankAnchors` 把它按 grace
-    /// 内 anchor 参与定位——否则退出/重开的新 `app-*`/`tabgrp-*` 首帧尾插、被 spring 拉回 = 影子滑动。
-    /// anchor 只用于把新 id 定位到同 app 同伴旁，算完即从可见输出滤除（用户只看到真实 current）。
+    /// Pure render projection: retain missing seats as rank anchors, then filter
+    /// them out. Snapshot arrival order never overrides an existing seat.
     func reconciled(current: [String], appKeyOf: [String: String] = [:],
                     headPreferred: Set<String> = []) -> [String] {
         var merged = stickyAppKeys
         merged.merge(appKeyOf) { _, new in new }
         let currentSet = Set(current)
-        let anchors = absentRankAnchors(current: currentSet, now: now())
+        let anchors = absentRankAnchors(current: currentSet)
         let effectiveCurrent = current + anchors
         backfillPlaceholderAppKeys(&merged, ids: effectiveCurrent)
         let ordered = StripOrdering.reconcile(
@@ -135,16 +124,9 @@ final class StripOrderStore: ObservableObject {
         return ordered.filter { !anchorSet.contains($0) }
     }
 
-    /// 缺席 rank-anchor（`reconciled` 渲染路径与 `sync` 副作用路径**共用**）：`liveOrder` 里本帧不在
-    /// `current`、但仍应保住位置的旧条目。**全集取自 `liveOrder`，不是 `absentSince.keys`**——渲染
-    /// 首帧发生在 `sync` 打戳之前，刚缺席的条目 `absentSince` 还是 nil，必须按 elapsed=0 视作 grace
-    /// 内 anchor；已打戳且仍在 grace 内继续作为 anchor；grace 过期不再作为 anchor。**纯读**，不写 `absentSince`。
-    private func absentRankAnchors(current: Set<String>, now: Date) -> [String] {
-        liveOrder.filter { id in
-            guard !current.contains(id) else { return false }
-            guard let t = absentSince[id] else { return true }   // 刚缺席（sync 尚未打戳）→ elapsed=0
-            return now.timeIntervalSince(t) <= Self.rankRetentionGrace
-        }
+    /// Retain missing seats without a five-second expiry. Pure read for both render and sync.
+    private func absentRankAnchors(current: Set<String>) -> [String] {
+        liveOrder.filter { !current.contains($0) }
     }
 
     /// `app-*` 占位 id 自带 bundleID；映射缺失时从 id 现补（`app-com.foo` → `com.foo`），保证首帧
@@ -165,7 +147,6 @@ final class StripOrderStore: ObservableObject {
         headPreferred: Set<String> = [],
         projectionSample: InventoryOrderProjectionSample? = nil
     ) {
-        let now = self.now()
         if let projectionSample, projectionSample != lastProjectionSample {
             inventoryLog.record(.orderProjectionChanged(
                 projectionSample.payload(previousLiveIDs: lastProjectionSample?.currentLiveIDs ?? [])
@@ -173,26 +154,15 @@ final class StripOrderStore: ObservableObject {
             lastProjectionSample = projectionSample
         }
         syncStableKeptMembership()
-        // 合并 appKeyOf 到粘性记忆
+        let mappingChanged = appKeyOf.contains { stickyAppKeys[$0.key] != $0.value }
         stickyAppKeys.merge(appKeyOf) { _, new in new }
 
         let currentSet = Set(current)
+        currentIDs = currentSet
 
-        // 返场的 id：清掉缺席戳。
-        for id in current { absentSince.removeValue(forKey: id) }
-        // 刚从记忆顺序里消失的 id：打上缺席戳（已在册的才记）。**打戳只在 sync**。
-        for id in liveOrder where !currentSet.contains(id) && absentSince[id] == nil {
-            absentSince[id] = now
-        }
-        // grace 内的缺席 id 视作「仍在场」→ 保住 rank；过期的不再保留 → 交给 reconcile 丢弃。
-        // 复用与 reconciled 同一套 anchor helper → pre-sync render 与 post-sync visible order 一致。
-        // 此处打戳已完成，故每个 anchor 都已有 absentSince（helper 的 nil 分支只在渲染路径生效）。
-        let anchors = absentRankAnchors(current: currentSet, now: now)
+        let anchors = absentRankAnchors(current: currentSet)
         let effectiveCurrent = current + anchors
         backfillPlaceholderAppKeys(&stickyAppKeys, ids: effectiveCurrent)
-        let expiredMemory = absentSince.filter {
-            now.timeIntervalSince($0.value) > Self.rankRetentionGrace
-        }
         let reconcileResult = StripOrdering.reconcileWithTrace(
             remembered: liveOrder,
             current: effectiveCurrent,
@@ -201,29 +171,23 @@ final class StripOrderStore: ObservableObject {
             stableKeptRanks: stableKeptRanks
         )
         var next = reconcileResult.order
-        absentSince = absentSince.filter { now.timeIntervalSince($0.value) <= Self.rankRetentionGrace }
         // 消费外部块暂存：当被拖 app 的窗口卡都进了 current（reconcile 已纳入 next），用 appKeyOf 解出这组
         // 卡、整块落到暂存目标，**在一次发布里完成**——无尾部闪入、不被对账规则挪走。排除 app-* 兜底卡。
         // keepPlacement 路径无窗口卡，回退用占位 id "app-\(bundleID)" 做单元素块。
         if var ext = externalBlock {
-            var blockIDs = next.filter { stickyAppKeys[$0] == ext.bundleID && !$0.hasPrefix("app-") }
+            var blockIDs = next.filter { currentSet.contains($0) && stickyAppKeys[$0] == ext.bundleID && !$0.hasPrefix("app-") }
             if blockIDs.isEmpty {
                 let placeholderID = "app-\(ext.bundleID)"
-                if next.contains(placeholderID) { blockIDs = [placeholderID] }
+                if currentSet.contains(placeholderID) { blockIDs = [placeholderID] }
             }
             if !blockIDs.isEmpty {
-                next = StripOrdering.movingBlock(next, move: blockIDs, relativeTo: ext.target, after: ext.after)
+                let seats = next.filter {
+                    blockIDs.contains($0) || (!currentSet.contains($0) && stickyAppKeys[$0] == ext.bundleID)
+                }
+                next = StripOrdering.movingBlock(next, move: seats, relativeTo: ext.target, after: ext.after)
                 ext.boundIDs = blockIDs
                 externalBlock = ext
             }
-        }
-        for (chipID, since) in expiredMemory {
-            inventoryLog.record(.orderMemoryDropped(InventoryOrderMemoryDroppedPayload(
-                chipID: chipID,
-                appKey: stickyAppKeys[chipID],
-                previousIndex: liveOrder.firstIndex(of: chipID) ?? -1,
-                absentForMs: max(0, Int((now.timeIntervalSince(since) * 1_000).rounded()))
-            )))
         }
         let currentSetForLog = Set(current)
         let visibleNextForLog = next.filter(currentSetForLog.contains)
@@ -237,13 +201,16 @@ final class StripOrderStore: ObservableObject {
         }
         if next != liveOrder {
             liveOrder = next
-            updateStableKeptOrder(from: liveOrder)
             persistLiveOrder()
-        } else {
-            updateStableKeptOrder(from: liveOrder)
+        } else if mappingChanged {
+            persistLiveOrder()
         }
-
-        // 淘汰粘性 appKey：只保留 current ∪ liveOrder 内的键（宽限中的 id 仍在 liveOrder 里）。
+        rememberNewApps(in: liveOrder)
+        if let ext = externalBlock, !ext.boundIDs.isEmpty {
+            rememberManualAppOrder(from: liveOrder, visible: currentSet)
+            updateStableKeptOrder(from: liveOrder.filter(currentSet.contains))
+        }
+        // Keep app identity for every remembered seat, including absent windows.
         let aliveKeys = currentSet.union(Set(liveOrder))
         stickyAppKeys = stickyAppKeys.filter { aliveKeys.contains($0.key) }
     }
@@ -252,42 +219,83 @@ final class StripOrderStore: ObservableObject {
 
     /// 转正进任务条：暂存"这个 app 的窗口卡整块落到 `target` 左/右（`target==nil` 末尾）"，下一次 `sync` 消费。
     func stageExternalBlock(bundleID: String, relativeTo target: String?, after: Bool) {
-        externalBlock = (bundleID, target, after, [])
+        externalBlock = ExternalBlock(bundleID: bundleID, target: target, after: after,
+                                      boundIDs: [], originalOrder: liveOrder, originalAppOrder: stableAppOrder)
     }
 
     /// 连续重排（窗口卡已实体化、暂存已消费后）：把这组 id 整块移到 `targetID` 处。变化才发布。
     func reorderBlock(ids: [String], relativeTo targetID: String, after: Bool) {
-        let next = StripOrdering.movingBlock(liveOrder, move: ids, relativeTo: targetID, after: after)
-        if next != liveOrder { liveOrder = next; updateStableKeptOrder(from: next); persistLiveOrder() }
+        let apps = Set(ids.compactMap { stickyAppKeys[$0] })
+        let seats = liveOrder.filter { ids.contains($0) || (!currentIDs.contains($0) && stickyAppKeys[$0].map(apps.contains) == true) }
+        let next = StripOrdering.movingBlock(liveOrder, move: seats, relativeTo: targetID, after: after)
+        if next != liveOrder {
+            liveOrder = next
+            rememberManualAppOrder(from: next, visible: currentIDs.union(ids))
+            updateStableKeptOrder(from: next.filter(currentIDs.contains))
+            persistLiveOrder()
+        }
     }
 
     /// 落定：仅清暂存追踪，`boundIDs` 留在 `liveOrder`（已是正常成员）。
     func commitExternalBlock() { externalBlock = nil }
 
-    /// 撤销转正：从 `liveOrder` 删 `boundIDs`、清它们的 `absentSince`（否则 5s rank 粘性会复活成幽灵排名）、
-    /// 清暂存。**必须在 `revertDrawerToStrip` 的 `drawerStore.add` 触发 sync 之前调**。
+    /// 撤销转正：从位置记忆中删掉本次绑定的卡并清暂存。**必须在 `revertDrawerToStrip` 的 `drawerStore.add` 触发 sync 之前调**。
     func cancelExternalBlock() {
         guard let ext = externalBlock else { return }
-        let ids = Set(ext.boundIDs)
-        if !ids.isEmpty {
-            let next = liveOrder.filter { !ids.contains($0) }
-            for id in ids { absentSince.removeValue(forKey: id) }
-            if next != liveOrder { liveOrder = next; updateStableKeptOrder(from: next); persistLiveOrder() }
-        }
+        let bound = Set(ext.boundIDs)
+        let original = Set(ext.originalOrder)
+        let next = ext.originalOrder + liveOrder.filter { !original.contains($0) && !bound.contains($0) }
+        let knownApps = Set(ext.originalAppOrder)
+        stableAppOrder = ext.originalAppOrder + stableAppOrder.filter { !knownApps.contains($0) }
+        defaults.set(stableAppOrder, forKey: stableAppOrderKey)
+        if next != liveOrder { liveOrder = next; persistLiveOrder() }
         externalBlock = nil
     }
 
     /// 拖动落位：把 `draggedID` 落到 `targetID` 的左/右边。先 reconcile 定下当前显示序，再插位；
     /// 顺序没变就不发布（拖动中 `dropUpdated` 高频调用，挡掉无谓 churn）。
     func reorder(draggedID: String, relativeTo targetID: String, after: Bool, current: [String]) {
-        let base = StripOrdering.reconcile(remembered: liveOrder, current: current, appKeyOf: stickyAppKeys)
-        let next = StripOrdering.reordering(base, move: draggedID, relativeTo: targetID, after: after)
-        if next != liveOrder { liveOrder = next; updateStableKeptOrder(from: next); persistLiveOrder() }
+        let base = StripOrdering.reconcile(remembered: liveOrder, current: current + absentRankAnchors(current: Set(current)), appKeyOf: stickyAppKeys)
+        // Move absent seats of this app with the dragged icon. Otherwise reopening
+        // after a manual drag could inherit an obsolete position from a hidden seat.
+        let active = Set(current)
+        let app = stickyAppKeys[draggedID]
+        let block = base.filter {
+            $0 == draggedID || (app != nil && stickyAppKeys[$0] == app && !active.contains($0))
+        }
+        let next = StripOrdering.movingBlock(base, move: block, relativeTo: targetID, after: after)
+        if next != liveOrder { liveOrder = next; rememberManualAppOrder(from: next, visible: Set(current)); updateStableKeptOrder(from: next); persistLiveOrder() }
     }
 
-    /// 落盘当前顺序：存 `tabgrp-*` + kept 的 `app-*` + 本次开机时间。
+    /// Persist all seat IDs and their app keys for this boot only.
+    private func rememberNewApps(in order: [String]) {
+        var known = Set(stableAppOrder)
+        for id in order {
+            guard let app = stickyAppKeys[id], known.insert(app).inserted else { continue }
+            stableAppOrder.append(app)
+        }
+        if defaults.stringArray(forKey: stableAppOrderKey) != stableAppOrder {
+            defaults.set(stableAppOrder, forKey: stableAppOrderKey)
+        }
+    }
+
+    /// Only explicit drag paths call this. Hidden applications retain their rank slots.
+    private func rememberManualAppOrder(from order: [String], visible: Set<String>) {
+        rememberNewApps(in: order)
+        var seen = Set<String>()
+        let apps = order.filter(visible.contains).compactMap { id -> String? in
+            guard let app = stickyAppKeys[id], seen.insert(app).inserted else { return nil }
+            return app
+        }
+        let moved = Set(apps)
+        let slots = stableAppOrder.indices.filter { moved.contains(stableAppOrder[$0]) }
+        for (slot, app) in zip(slots, apps) { stableAppOrder[slot] = app }
+        defaults.set(stableAppOrder, forKey: stableAppOrderKey)
+    }
+
     private func persistLiveOrder() {
-        defaults.set(StripOrdering.persistableLiveOrder(liveOrder, keptIDs: keptIDsProvider()), forKey: orderKey)
+        defaults.set(liveOrder, forKey: orderKey)
+        defaults.set(stickyAppKeys, forKey: appKeysKey)
         defaults.set(bootTime, forKey: bootKey)
     }
 

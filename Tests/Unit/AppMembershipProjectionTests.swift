@@ -3,6 +3,62 @@ import XCTest
 
 final class AppMembershipProjectionTests: XCTestCase {
 
+    func testRunningAppWithoutInventoryGetsAnEntryWithoutDuplicatingOtherSources() {
+        let running: Set<String> = ["missing", "windowed", "kept", "messaging", "drawer", "self", "finder"]
+        let result = AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: running, representedIDs: ["windowed"], keptIDs: ["kept", "not-running-kept"],
+            messagingIDs: ["messaging"], drawerIDs: ["drawer"], excludedIDs: ["self", "finder"])
+        XCTAssertEqual(result, ["missing"])
+    }
+
+    func testMissingAppLeavesFallbackWhenInventoryRecoversOrProcessQuits() {
+        func missing(_ running: Set<String>, represented: Set<String>) -> [String] {
+            AppMembershipProjection.missingRunningAppIDs(runningIDs: running, representedIDs: represented,
+                keptIDs: [], messagingIDs: [], drawerIDs: [], excludedIDs: [])
+        }
+        XCTAssertEqual(missing(["app"], represented: []), ["app"])
+        XCTAssertEqual(missing(["app"], represented: ["app"]), [])
+        XCTAssertEqual(missing(["app"], represented: []), ["app"])
+        XCTAssertEqual(missing([], represented: []), [])
+    }
+
+    func testDisabledDrawerLetsUnrepresentedRunningAppsReturnToStrip() {
+        XCTAssertEqual(AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: ["drawer-app"], representedIDs: [], keptIDs: [], messagingIDs: [],
+            drawerIDs: ["drawer-app"], excludedIDs: []), [])
+        XCTAssertEqual(AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: ["drawer-app"], representedIDs: [], keptIDs: [], messagingIDs: [],
+            drawerIDs: [], excludedIDs: []), ["drawer-app"])
+    }
+
+    func testChromeOffDesktopWindowRemainsRepresentedWithoutDuplicateAppIcon() {
+        let chrome = "com.google.Chrome"
+        let id = WindowID(rawValue: "chrome-fullscreen-window")
+        let record = WindowRecord(id: id, appID: AppID(rawValue: chrome), pid: 711,
+            bundleIdentifier: chrome, title: "Chrome", bounds: nil, status: .inactive,
+            isOnDesktop: false)
+        let items = StripItem.items(from: DockSnapshot(windows: [id: record], orderedWindowIDs: [id]))
+        XCTAssertEqual(items.map(\.bundleIdentifier), [chrome])
+        XCTAssertFalse(items[0].isOnDesktop)
+        XCTAssertEqual(AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: [chrome], representedIDs: Set(items.compactMap(\.bundleIdentifier)),
+            keptIDs: [], messagingIDs: [], drawerIDs: [], excludedIDs: []), [])
+    }
+
+    func testChromeSpaceTransitionAndTerminalHiddenDrawerStillHaveAppEntries() {
+        let chrome = "com.google.Chrome"
+        let terminal = "com.apple.Terminal"
+        let running: Set<String> = [chrome, terminal]
+        // Empty window inventory during a transition; the drawer is disabled.
+        XCTAssertEqual(Set(AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: running, representedIDs: [], keptIDs: [], messagingIDs: [],
+            drawerIDs: [], excludedIDs: [])), running)
+        // Inventory recovers: only the still-unrepresented Terminal needs a fallback.
+        XCTAssertEqual(AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: running, representedIDs: [chrome], keptIDs: [], messagingIDs: [],
+            drawerIDs: [], excludedIDs: []), [terminal])
+    }
+
     func testDrawerMembersDeduplicates() {
         let result = AppMembershipProjection.drawerMembers(drawerIDs: ["a", "a", "b"])
         XCTAssertEqual(result, ["a", "b"])

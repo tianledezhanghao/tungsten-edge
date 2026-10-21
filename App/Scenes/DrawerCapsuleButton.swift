@@ -92,7 +92,8 @@ struct DrawerCapsuleButton: View {
             DockPanelBackdrop(theme: theme,
                               cornerRadius: DockShape.panelCornerRadius * dockScale,
                               usesLiquidGlass: usesLiquidGlass,
-                              matchesDockRefraction: true)
+                              matchesDockRefraction: true,
+                              usesRawVariant3: settingsStore.dockBackgroundStyle == .variant3)
 
             // Hover and press feedback move only the cell under the pointer; the outer frame
             // (backdrop + rim) stays still.
@@ -105,10 +106,12 @@ struct DrawerCapsuleButton: View {
                 pagedPreview(ids: ids, pageCount: pageCount, page: page, hitPage: hitPage)
             }
         }
+        .environment(\.dockClickScaleEnabled, settingsStore.clickScaleEnabled)
         .dockPanelRim(cornerRadius: DockShape.panelCornerRadius * dockScale,
                       style: theme.panelRimStyle,
                       lineWidth: theme.panelRimLineWidth,
-                      usesLiquidGlass: usesLiquidGlass)
+                      usesLiquidGlass: usesLiquidGlass,
+                      usesRawVariant3: settingsStore.dockBackgroundStyle == .variant3)
         // 拖卡悬到胶囊上：**微微发光 + 极轻微放大**（去掉原来生硬的白圈描边,owner 2026-06-21）。
         .scaleEffect(showsDropFeedback ? 1.04 : 1.0)
         .dockGlow(theme.capsuleStashGlow, radius: 5, active: showsDropFeedback)
@@ -116,7 +119,7 @@ struct DrawerCapsuleButton: View {
         .dockShadow(theme.stripShadow,
                     visible: DockLiquidGlassConfiguration.stripShadowVisible(
                         usesLiquidGlass: usesLiquidGlass,
-                        usesSystemVariant: DockGlassPresentation.usesSystemVariant))
+                        usesSystemVariant: (settingsStore.dockBackgroundStyle == .variant3) || DockGlassPresentation.usesSystemVariant))
         // After the scale, so the hover zoom never moves the zone; inside the shadow padding, so
         // the zone is the visible capsule + tolerance — the strip→capsule stash zone.
         .overlay(DrawerAppDropReceiver(
@@ -546,12 +549,10 @@ private struct DrawerCapsuleAppIcon: View {
     @Environment(\.isPanelHeightResizing) private var isPanelHeightResizing
 
     var body: some View {
-        Image(nsImage: AppIconResolver.icon(for: bundleID, points: size, displayScale: displayScale,
-                                             colorScheme: colorScheme, allowsRendering: !isPanelHeightResizing))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
+        PixelAlignedIcon(image: AppIconResolver.icon(for: bundleID, points: size,
+            displayScale: displayScale, colorScheme: colorScheme, allowsRendering: !isPanelHeightResizing),
+            points: size)
             .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: size / 4, style: .continuous))
             .offset(y: bounceUp ? -bounceHeight : 0)
             .animation(.easeInOut(duration: 0.25), value: bounceUp)
             .onAppear { if isLaunching { startBounce() } }

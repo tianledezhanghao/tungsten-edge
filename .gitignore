@@ -36,6 +36,9 @@ AGENTS.md
 CLAUDE.md
 .codex/
 Docs/*.md
+!Docs/local-development.md
+!Docs/work-orders.md
+!Docs/liquid-glass-investigation.md
 Docs/Archive/Diagnostics/
 Docs/Archive/Engineering/
 Docs/Archive/Planning/

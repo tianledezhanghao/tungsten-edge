@@ -287,6 +287,52 @@ extension DockThemeTokens {
     }
 }
 
+private struct DockShowRunningIndicatorsKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+private struct DockClickScaleEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var dockShowRunningIndicators: Bool {
+        get { self[DockShowRunningIndicatorsKey.self] }
+        set { self[DockShowRunningIndicatorsKey.self] = newValue }
+    }
+
+    var dockClickScaleEnabled: Bool {
+        get { self[DockClickScaleEnabledKey.self] }
+        set { self[DockClickScaleEnabledKey.self] = newValue }
+    }
+}
+
+private struct DockHoverMagnificationEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var dockHoverMagnificationEnabled: Bool {
+        get { self[DockHoverMagnificationEnabledKey.self] }
+        set { self[DockHoverMagnificationEnabledKey.self] = newValue }
+    }
+}
+
+private struct ChipQuietHoverScaleModifier: ViewModifier {
+    @Environment(\.dockHoverMagnificationEnabled) private var enabled
+    let isActive: Bool
+    let cardWidth: CGFloat
+    let scale: CGFloat
+
+    func body(content: Content) -> some View {
+        let active = enabled && isActive
+        let target = ChipPillMetrics.quietHoverScale(forCardWidth: cardWidth, scale: scale)
+        content
+            .scaleEffect(active ? target : 1, anchor: .bottom)
+            .animation(.easeOut(duration: 0.12), value: active)
+    }
+}
+
 extension View {
     /// 安静档的悬停反馈：整块**轻微放大**。判据见 `HoverStyle.showsQuietHoverFeedback`。
     ///
@@ -309,10 +355,7 @@ extension View {
     /// 等比放大在 168pt 的标题卡上会外扩 8.4pt，把 10pt 的卡间缝挤掉（owner 2026-08-17 报）。
     /// **故意不给默认值**：漏传必须是编译错误，同 `scale` / `hoverStyle` 那条既有规矩。
     func chipQuietHoverScale(_ isActive: Bool, cardWidth: CGFloat, scale: CGFloat) -> some View {
-        let target = ChipPillMetrics.quietHoverScale(forCardWidth: cardWidth, scale: scale)
-        return self
-            .scaleEffect(isActive ? target : 1, anchor: .bottom)
-            .animation(.easeOut(duration: 0.12), value: isActive)
+        modifier(ChipQuietHoverScaleModifier(isActive: isActive, cardWidth: cardWidth, scale: scale))
     }
 
     /// 给毛玻璃底板加背景提饱和。**1.0 时整个修饰符都不挂**——`.saturation(1.0)` 虽是恒等，

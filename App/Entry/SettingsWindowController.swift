@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
+    private let messagingStore: MessagingAppStore
     private let store: AppSettingsStore
     private let coordinator: SettingsCoordinator
     private let licenseStore: LicenseStore
@@ -24,11 +25,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     init(
         store: AppSettingsStore,
+        messagingStore: MessagingAppStore,
         coordinator: SettingsCoordinator,
         licenseStore: LicenseStore,
         onShowWelcomeGuide: @escaping () -> Void
     ) {
         self.store = store
+        self.messagingStore = messagingStore
         self.coordinator = coordinator
         self.licenseStore = licenseStore
         self.onShowWelcomeGuide = onShowWelcomeGuide
@@ -43,6 +46,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let host = NSHostingView(
             rootView: SettingsWindowView(
                 store: store,
+                messagingStore: messagingStore,
                 coordinator: coordinator,
                 licenseStore: licenseStore,
                 tabState: tabState,
@@ -153,6 +157,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let probe = NSHostingView(
             rootView: SettingsWindowContent(
                 store: store,
+                messagingStore: messagingStore,
                 coordinator: coordinator,
                 licenseStore: licenseStore,
                 tabState: tabState,

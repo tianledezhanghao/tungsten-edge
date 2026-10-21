@@ -414,6 +414,7 @@ extension PanelCoordinator {
     /// 预测命中后把每一块面板都移出 WindowServer。抽屉/弹窗必须走「立即」路径：输入已经
     /// 被 tap 扣住了，等不了淡出动画。
     private func orderOutPanelsForFullscreenPrediction() {
+        cancelDockVisibilityAnimation()
         edgeIdleHideTimer?.invalidate()
         edgeIdleHideTimer = nil
         cancelEdgeWake()
@@ -464,6 +465,7 @@ extension PanelCoordinator {
         // 同步瞬时 orderOut。handoff 在淡出调度后立即返回，输入不被阻塞。
         // 逻辑态立刻置「已藏」：不然本函数末尾的异步 reconcile 会看到 shouldShow=false、
         // panelsAreVisible=true，直接走硬 orderOut 把淡出绕过去。视觉上的 orderOut 等淡出完。
+        cancelDockVisibilityAnimation()
         panelsAreVisible = false
         lastHideWasForFullscreen = true
         onLogicalVisibilityChanged?(false)

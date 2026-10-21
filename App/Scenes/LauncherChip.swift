@@ -70,6 +70,7 @@ struct LauncherChip: View {
     /// Only set by DrawerView; strip messaging chips leave it nil.
     var onPrimaryAction: (() -> Void)? = nil
 
+    @Environment(\.dockShowRunningIndicators) private var showsRunningIndicators
     @Environment(\.colorScheme) private var colorScheme
     private var theme: DockThemeTokens { .resolved(for: colorScheme) }
     /// 见 `EnvironmentValues.isDragCarrierSnapshot`：拍副本时不画圆点、不烘投影。
@@ -193,12 +194,10 @@ struct LauncherChip: View {
     }
 
     private func icon(size: CGFloat, bounceLift: CGFloat) -> some View {
-        Image(nsImage: AppIconResolver.icon(for: bundleID, points: size, displayScale: displayScale,
-                                             colorScheme: colorScheme, allowsRendering: !isPanelHeightResizing))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
+        PixelAlignedIcon(image: AppIconResolver.icon(for: bundleID, points: size,
+            displayScale: displayScale, colorScheme: colorScheme, allowsRendering: !isPanelHeightResizing),
+            points: size)
             .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: size / 4, style: .continuous))
             .offset(y: bounceUp ? -bounceLift : 0)
             .animation(.easeInOut(duration: 0.25), value: bounceUp)
     }
@@ -206,7 +205,7 @@ struct LauncherChip: View {
     /// 同 `ChipView`：拖起来的副本不画圆点（原生 Dock 同款）。
     @ViewBuilder
     private func runningDot(visual: LauncherChipVisualPlan.Visual, diameter: CGFloat, bottomPadding: CGFloat) -> some View {
-        if visual.showsRunningDot && !isDragCarrierSnapshot {
+        if showsRunningIndicators && visual.showsRunningDot && !isDragCarrierSnapshot {
             Circle()
                 .fill(theme.runningDot.color)
                 .frame(width: diameter, height: diameter)

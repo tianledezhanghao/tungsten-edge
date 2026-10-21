@@ -76,6 +76,7 @@ extension PanelCoordinator {
         // Prevent NSHostingView from adding its own opaque background over the blur
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.0).cgColor
+        panel.identifier = NSUserInterfaceItemIdentifier("tungsten-taskbar-content")
         dockContentHost = ManualPanelHost(contentView: hosting, in: panel)
         dockPanel = panel
 
@@ -88,7 +89,11 @@ extension PanelCoordinator {
     private func makeTaskbarGlassBackground(
         contentPanelFrame: NSRect
     ) -> (NonConstrainingPanel, DockTaskbarLiquidGlassBackgroundView)? {
-        guard DockGlassPresentation.shouldAttemptTaskbarComposite else { return nil }
+        if settingsStore.dockBackgroundStyle == .classic {
+            guard DockGlassPresentation.shouldAttemptTaskbarComposite else { return nil }
+        } else {
+            guard #available(macOS 26.0, *), DockGlassPresentation.configuration.isEnabled else { return nil }
+        }
 
         let configuration = DockGlassPresentation.configuration
         let backgroundFrame = DockLiquidGlassPanelGeometry.backgroundFrame(
@@ -116,11 +121,13 @@ extension PanelCoordinator {
         )
         backgroundView.autoresizingMask = [.width, .height]
         panel.contentView = backgroundView
+        panel.identifier = NSUserInterfaceItemIdentifier("tungsten-taskbar-backing")
+        backgroundView.setRawVariant3(settingsStore.dockBackgroundStyle == .variant3)
 
         // The blur call is tuning only (default radius 0 = no call), and its failure must never
         // decide the render path: this used to be a guard that dropped the whole composite, which
         // is the suspected way macOS 26.x users lost the glass (why the call failed there is unknown).
-        if let blurRadius = configuration.requestedWindowBlurRadius,
+        if settingsStore.dockBackgroundStyle == .classic, let blurRadius = configuration.requestedWindowBlurRadius,
            !TEDockGlassSetWindowBackgroundBlurRadius(panel.windowNumber, blurRadius) {
             print("[glass] window blur radius \(blurRadius) rejected by WindowServer; continuing without it")
         }
@@ -137,6 +144,19 @@ extension PanelCoordinator {
         background.close()
         dockGlassBackgroundView = nil
         dockGlassBackgroundPanel = nil
+    }
+
+    func orderDockAndCapsuleFront() {
+        if let group = dockVisibilityWindowGroup {
+            group.orderFrontTogether()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            orderDockSurfaceFront()
+            if settingsStore.showDrawer { capsulePanel?.orderFrontRegardless() }
+        }
     }
 
     func orderDockSurfaceFront() {
@@ -252,6 +272,7 @@ extension PanelCoordinator {
         )
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.0).cgColor
+        panel.identifier = NSUserInterfaceItemIdentifier("tungsten-taskbar-capsule")
         capsuleContentHost = ManualPanelHost(contentView: hosting, in: panel)
         capsulePanel = panel
     }
@@ -263,8 +284,7 @@ extension PanelCoordinator {
         dock.layoutIfNeeded()
         capsule.layoutIfNeeded()
         relayout(animated: false)
-        orderDockSurfaceFront()
-        capsule.orderFrontRegardless()
+        orderDockAndCapsuleFront()
     }
 
     /// `usesLiquidGlass` 由调用方显式传：`setupDockPanel` 里玻璃底板刚建好、还没赋给

@@ -25,6 +25,12 @@ enum AppearanceMode: String, CaseIterable {
     }
 }
 
+/// Taskbar and drawer-entrance background, independent of app-wide appearance.
+enum DockBackgroundStyle: String, CaseIterable {
+    case classic
+    case variant3
+}
+
 /// 悬停效果档位。
 /// - `standard`：图标 36→24pt 缩放 + 下方冒出名字 + 文件夹格整块放大（原生程序坞手感）。
 /// - `quiet`：鼠标划过任务条时**完全静止**——不缩放、不移动、不冒名字、胶囊底色不提亮。
@@ -103,14 +109,21 @@ final class AppSettingsStore: ObservableObject {
     /// 中转格是否显示在固定文件夹区头位。关掉后它不再渲染，暂存的文件不受影响。
     @Published private(set) var showShelf: Bool
     @Published private(set) var showTrash: Bool
+    @Published private(set) var showDrawer: Bool
     /// Front-window bar: the running dot under the card whose window is in front stretches into a
     /// short bar (`FrontWindowIndicatorDecision`). Off by default for everyone (owner 2026-10-16),
     /// so it sits in `register(defaults:)` like the other plain toggles — no fresh-install seed.
     @Published private(set) var frontWindowBar: Bool
     /// 任务条尺寸档位。面板几何与条内所有 chip 尺寸都由它派生。
     @Published private(set) var dockPanelHeight: DockPanelHeight
+    @Published private(set) var dockBottomGap: Double
+
     /// 悬停效果档位。只影响条内 chip 的悬停视觉，静息布局逐像素不变（因此无需 relayout）。
     @Published private(set) var hoverStyle: HoverStyle
+    @Published private(set) var dockBackgroundStyle: DockBackgroundStyle
+    @Published private(set) var showRunningIndicators: Bool
+    @Published private(set) var clickScaleEnabled: Bool
+    @Published private(set) var hoverMagnificationEnabled: Bool
     /// 最大化窗口避让任务条（菜单「最大化窗口避开任务条」）。
     /// **全新安装播种为开，老用户维持关**（owner 2026-09-01；此前所有人默认关）——
     /// 它配的是同一轮定的「任务条默认常驻」：常驻会压住最大化窗口的底边，避让正好补上。
@@ -174,7 +187,11 @@ final class AppSettingsStore: ObservableObject {
             Keys.launchAtLogin: false,
             Keys.showShelf: true,
             Keys.showTrash: true,
+            Keys.showDrawer: true,
             Keys.frontWindowBar: false,
+            Keys.showRunningIndicators: true,
+            Keys.clickScaleEnabled: true,
+            Keys.hoverMagnificationEnabled: true,
             Keys.fullscreenIntentEnabled: true,
             Keys.nativeDockAutoHideDelay: Self.defaultNativeDockAutoHideDelay,
             // 首次安装 = 常驻；remembered 的种子仍是有限档，见常量注释。
@@ -184,6 +201,7 @@ final class AppSettingsStore: ObservableObject {
         launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
         showShelf = defaults.bool(forKey: Keys.showShelf)
         showTrash = defaults.bool(forKey: Keys.showTrash)
+        showDrawer = defaults.bool(forKey: Keys.showDrawer)
         frontWindowBar = defaults.bool(forKey: Keys.frontWindowBar)
         // 有意**不**进上面的 register：缺键即 false = 老用户维持关。
         // 全新安装那一次由 `seedWindowLiftEnabledForFreshInstall()` 显式写成 true——
@@ -230,6 +248,28 @@ final class AppSettingsStore: ObservableObject {
         // never written or removed, so a rollback still finds it). Corrupt values fall back to
         // the native height and are rewritten immediately, like every other key here.
         dockPanelHeight = Self.storedDockPanelHeight(defaults: defaults)
+        dockBottomGap = Self.sanitizedDockBottomGap(
+            Self.storedNumericValue(defaults.object(forKey: Keys.dockBottomGap)) ?? Self.defaultDockBottomGap
+        )
+        let oldBackground = defaults.string(forKey: Keys.dockBackgroundStyle)
+        let resolvedBackground: DockBackgroundStyle
+        if let style = oldBackground.flatMap(DockBackgroundStyle.init(rawValue:)) {
+            resolvedBackground = style
+        } else if oldBackground == nil,
+                  defaults.object(forKey: "com.tungsten.edge.clearGlassBackgroundEnabled") as? Bool == false {
+            resolvedBackground = .classic
+        } else {
+            resolvedBackground = .variant3
+        }
+        dockBackgroundStyle = resolvedBackground
+        defaults.set(resolvedBackground.rawValue, forKey: Keys.dockBackgroundStyle)
+        for key in ["clearGlassBackgroundEnabled", "nativeGlassExperiment", "nativeGlassDarkAppearance",
+                    "nativeGlassComposition", "debugGlassProfile"] {
+            defaults.removeObject(forKey: "com.tungsten.edge." + key)
+        }
+        showRunningIndicators = defaults.bool(forKey: Keys.showRunningIndicators)
+        clickScaleEnabled = defaults.bool(forKey: Keys.clickScaleEnabled)
+        hoverMagnificationEnabled = defaults.bool(forKey: Keys.hoverMagnificationEnabled)
         hoverStyle = HoverStyle(rawValue: defaults.string(forKey: Keys.hoverStyle) ?? "") ?? .default
         let nativeDelay = Self.sanitizedStoredDelay(
             defaults.object(forKey: Keys.nativeDockAutoHideDelay),
@@ -257,12 +297,38 @@ final class AppSettingsStore: ObservableObject {
         } else {
             lastEnabledEdgeAutoHideDelay = edgeDelay
         }
+        defaults.set(dockBottomGap, forKey: Keys.dockBottomGap)
         defaults.set(Double(dockPanelHeight.points), forKey: Keys.dockPanelHeight)
         defaults.set(hoverStyle.rawValue, forKey: Keys.hoverStyle)
         defaults.set(nativeDelay, forKey: Keys.nativeDockAutoHideDelay)
         defaults.set(lastEnabledNativeDockAutoHideDelay, forKey: Keys.nativeDockAutoHideLastEnabledDelay)
         defaults.set(edgeDelay, forKey: Keys.edgeAutoHideDelay)
         defaults.set(lastEnabledEdgeAutoHideDelay, forKey: Keys.edgeAutoHideLastEnabledDelay)
+    }
+
+    static let dockBottomGapRange: ClosedRange<Double> = 0...20
+    static let defaultDockBottomGap: Double = 8
+
+    var dockPanelMetrics: PanelLayoutMetrics {
+        var metrics = dockPanelHeight.metrics
+        metrics.bottomGap = CGFloat(dockBottomGap)
+        if !showDrawer {
+            metrics.capsuleWidth = 0
+            metrics.capsuleGap = 0
+        }
+        return metrics
+    }
+
+    static func sanitizedDockBottomGap(_ raw: Double) -> Double {
+        guard raw.isFinite else { return defaultDockBottomGap }
+        return min(max(raw.rounded(), dockBottomGapRange.lowerBound), dockBottomGapRange.upperBound)
+    }
+
+    func setDockBottomGap(_ raw: Double) {
+        let value = Self.sanitizedDockBottomGap(raw)
+        guard dockBottomGap != value else { return }
+        dockBottomGap = value
+        defaults.set(value, forKey: Keys.dockBottomGap)
     }
 
     /// Called on every accepted tick of a height drag (the drag decision already dedupes to
@@ -358,10 +424,40 @@ final class AppSettingsStore: ObservableObject {
         )
     }
 
+    func setDockBackgroundStyle(_ style: DockBackgroundStyle) {
+        guard dockBackgroundStyle != style else { return }
+        dockBackgroundStyle = style
+        defaults.set(style.rawValue, forKey: Keys.dockBackgroundStyle)
+    }
+
+    func setShowRunningIndicators(_ enabled: Bool) {
+        guard showRunningIndicators != enabled else { return }
+        showRunningIndicators = enabled
+        defaults.set(enabled, forKey: Keys.showRunningIndicators)
+    }
+
+    func setClickScaleEnabled(_ enabled: Bool) {
+        guard clickScaleEnabled != enabled else { return }
+        clickScaleEnabled = enabled
+        defaults.set(enabled, forKey: Keys.clickScaleEnabled)
+    }
+
+    func setHoverMagnificationEnabled(_ enabled: Bool) {
+        guard hoverMagnificationEnabled != enabled else { return }
+        hoverMagnificationEnabled = enabled
+        defaults.set(enabled, forKey: Keys.hoverMagnificationEnabled)
+    }
+
     func setHoverStyle(_ value: HoverStyle) {
         guard hoverStyle != value else { return }
         hoverStyle = value
         defaults.set(value.rawValue, forKey: Keys.hoverStyle)
+    }
+
+    func setShowDrawer(_ enabled: Bool) {
+        guard showDrawer != enabled else { return }
+        showDrawer = enabled
+        defaults.set(enabled, forKey: Keys.showDrawer)
     }
 
     func setShowShelf(_ value: Bool) {
@@ -550,12 +646,19 @@ private enum Keys {
     static let launchAtLogin = "com.tungsten.edge.launchAtLogin"
     static let showShelf = "com.tungsten.edge.showShelf"
     // Never read the retired com.tungsten.edge.trash.visible key.
+    static let showDrawer = "com.tungsten.edge.showDrawer"
     static let showTrash = "com.tungsten.edge.showTrash"
     static let frontWindowBar = "com.tungsten.edge.frontWindowBar"
+    static let dockBottomGap = "com.tungsten.edge.dockBottomGap"
     /// Continuous bar height in points (since the drag-to-resize release).
     static let dockPanelHeight = "com.tungsten.edge.dockPanelHeight"
     /// Legacy four-tier raw string. **Read once for migration, never written or removed.**
     static let dockSize = "com.tungsten.edge.dockSize"
+    static let dockBackgroundStyle = "com.tungsten.edge.dockBackgroundStyle"
+    /// Legacy two-choice setting, read only for migration.
+    static let showRunningIndicators = "com.tungsten.edge.showRunningIndicators"
+    static let clickScaleEnabled = "com.tungsten.edge.clickScaleEnabled"
+    static let hoverMagnificationEnabled = "com.tungsten.edge.hoverMagnificationEnabled"
     static let hoverStyle = "com.tungsten.edge.hoverStyle"
     /// system / light / dark. Missing key = system.
     /// The pre-glass `com.tungsten.edge.appearanceMode` is an orphan and stays one: never read,

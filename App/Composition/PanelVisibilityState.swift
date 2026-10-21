@@ -166,7 +166,8 @@ struct PanelVisibilityState: Equatable {
 
 @MainActor
 enum EdgeAutoHideRuntimeRules {
-    static let fixedIdleHideDelay: Double = 0.2
+    // Start retracting on pointer exit; the spring itself provides the transition.
+    static let fixedIdleHideDelay: Double = 0
 
     static func canArmWake(state: PanelVisibilityState, delay: Double) -> Bool {
         state.hideReasons.contains(.edgeAutoHide)

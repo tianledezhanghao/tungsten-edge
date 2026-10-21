@@ -119,7 +119,8 @@ final class TaskbarScreenOrchestrator: NSObject, WindowLiftAvoidanceHost {
             // 「显示器具有单独的空间」下一个窗口只属于一块屏，铺并集反而在另一块屏上画不出来。
             screensProvider: { NSScreen.screens },
             // 松在胶囊上收纳时图标吸进这里（鼠标所在屏那个单元的胶囊可视帧）。
-            stashTargetProvider: { [weak dragHost] in dragHost?.stashTargetFrame }
+            stashTargetProvider: { [weak dragHost] in dragHost?.stashTargetFrame },
+            clickScaleEnabledProvider: { [weak settingsStore] in settingsStore?.clickScaleEnabled ?? false }
         )
         super.init()
         dragHost.owner = self
@@ -630,6 +631,8 @@ final class TaskbarScreenOrchestrator: NSObject, WindowLiftAvoidanceHost {
     /// 每个鼠标移动事件都进这里（移动时可达上百 Hz）。节流到 ≤30Hz：悬停切换要 350ms 驻留、
     /// 边缘唤醒对 33ms 无感；窗口内恰好停住的最后一个位置由 trailing 收尾补判，不丢热区进出。
     private func hoverPollEventArrived() {
+        // Retraction must start on the exit event, not after the 30Hz wake/screen poll.
+        units.forEach { $0.coordinator.updateEdgeIdleTimerFromMouse() }
         guard Self.hoverMonitorLeanEnabled else {
             // 旧行为原样：每事件经一次主线程 Task 跳转后全量处理。
             Task { @MainActor [weak self] in self?.pollAllUnits() }

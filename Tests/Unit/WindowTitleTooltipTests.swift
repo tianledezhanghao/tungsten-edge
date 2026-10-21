@@ -201,10 +201,10 @@ final class ChipPillMetricsTests: XCTestCase {
     ///
     /// 改成缩放前这四个数是写死的，四个档位一样大——和悬停气泡是同一类漏网。
     func testBadgeMetricsKeepTheMediumLiteralsAndScaleWithTheTier() {
-        XCTAssertEqual(ChipPillMetrics.badgeFontSize, 10)
-        XCTAssertEqual(ChipPillMetrics.badgeMinimumSize, 16)
-        XCTAssertEqual(ChipPillMetrics.badgeHorizontalPadding, 5)
-        XCTAssertEqual(ChipPillMetrics.badgeTopOffset, 5)
+        XCTAssertEqual(ChipPillMetrics.badgeFontSize, 9)
+        XCTAssertEqual(ChipPillMetrics.badgeMinimumSize, 14)
+        XCTAssertEqual(ChipPillMetrics.badgeHorizontalPadding, 4)
+        XCTAssertEqual(ChipPillMetrics.badgeTopOffset, 6)
         // 中档 scale 恒为 1，所以「乘 scale」在中档就是原值——这条同时锁住那个恒等式。
         XCTAssertEqual(DockPanelHeight.native.scale, 1.0, accuracy: 0.0000001)
     }

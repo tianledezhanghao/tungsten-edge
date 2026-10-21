@@ -59,7 +59,7 @@ final class PanelCoordinator: NSObject {
     /// Panel geometry follows the user's bar height, so these are **instance** properties that
     /// read the store; only `shadowPadding` stays static (fixed 20, referenced by the drawer
     /// and both popups).
-    var layoutMetrics: PanelLayoutMetrics { settingsStore.dockPanelHeight.metrics }
+    var layoutMetrics: PanelLayoutMetrics { settingsStore.dockPanelMetrics }
     var panelHeight: CGFloat { layoutMetrics.panelHeight }
     var windowHeight: CGFloat { layoutMetrics.windowHeight }
     var capsuleWidth: CGFloat { layoutMetrics.capsuleWidth }
@@ -269,7 +269,10 @@ final class PanelCoordinator: NSObject {
     var displayTopologySubscription: AnyCancellable?
     var showShelfSubscription: AnyCancellable?
     var showTrashSubscription: AnyCancellable?
+    var showDrawerSubscription: AnyCancellable?
+    var glassBackgroundSubscription: AnyCancellable?
     var dockPanelHeightSubscription: AnyCancellable?
+    var dockBottomGapSubscription: AnyCancellable?
     /// Height-change transaction generation: swallows animated relayouts other paths queue
     /// while a height change is in flight (see `beginPanelHeightChange`).
     var panelHeightChangeGeneration: UInt64 = 0
@@ -380,8 +383,12 @@ final class PanelCoordinator: NSObject {
     var fullscreenSpaceIntentGeneration: UInt64?
     var fullscreenSpaceIntentTimer: Timer?
     var fullscreenSpaceIntentVerdictTimer: Timer?
-    /// 上一次隐藏是不是因为全屏。是 → 下次揭示走 0.18s 淡入（全屏回归的入场动画）；
-    /// 否 → 边缘自动隐藏的唤出保持即时。只在 applyPanelVisibility / 预测隐藏两处写。
+    var dockVisibilityClock: DockVisibilityAnimationClock?
+    var dockVisibilityMotion: DockVisibilitySpring?
+    var dockVisibilityWindowGroup: DockVisibilityWindowGroup?
+    var dockVisibilityTimeline = DockVisibilityTimeline()
+    var dockVisibilityOffset: CGFloat = 0
+    /// Fullscreen transitions retain their separate fade / immediate-hide safety path.
     var lastHideWasForFullscreen = false
     /// 「常驻所有桌面」成员资格修复（issue #19）。见 `AllSpacesMembership` 的机制说明。
     /// 关掉用 `DOCK_SPACE_MEMBERSHIP_REPAIR=0`。
@@ -487,6 +494,8 @@ final class PanelCoordinator: NSObject {
         fullscreenSpaceIntentTimer?.invalidate()
         fullscreenSpaceIntentVerdictTimer?.invalidate()
         MainActor.assumeIsolated {
+            dockVisibilityClock?.invalidate()
+            dockVisibilityWindowGroup?.detach()
             dismissWindowTitleTooltip()
             tearDownTaskbarGlassBackground()
         }
@@ -520,6 +529,7 @@ final class PanelCoordinator: NSObject {
     func tearDown() {
         guard !isSuspendedForPermissionLoss else { return }
         isSuspendedForPermissionLoss = true
+        cancelDockVisibilityAnimation()
         cancelInteractiveResize()
         tearDownResizeCursor()
         fullscreenIntentRoutingEnabled = false
@@ -618,6 +628,7 @@ final class PanelCoordinator: NSObject {
     /// - `.drawer`（抽屉图标找移回目标）= 任务条 dock 面板可见内容区（减 shadowPadding）。
     /// 胶囊的可视帧（屏幕坐标，目标帧优先）。给 `DragController` 的「吸进胶囊」飞行当终点。
     var capsuleVisibleFrame: CGRect? {
+        guard settingsStore.showDrawer else { return nil }
         let frame = lastCapsuleTargetFrame != .zero ? lastCapsuleTargetFrame : capsulePanel?.frame
         return frame?.insetBy(dx: Self.shadowPadding, dy: Self.shadowPadding)
     }
@@ -647,16 +658,18 @@ final class PanelCoordinator: NSObject {
     /// 必须在每个桌面上都在的面板。抽屉 / 文件夹弹窗 / 悬停气泡是瞬时面板——下次弹出时
     /// `orderFrontRegardless` 自然落到当前桌面，用户永远不会在别的桌面上等它们，故不参与修复。
     var allSpacesPanels: [NSPanel] {
-        [dockGlassBackgroundPanel, dockPanel, capsulePanel].compactMap { $0 }
+        [dockGlassBackgroundPanel, dockPanel, settingsStore.showDrawer ? capsulePanel : nil].compactMap { $0 }
     }
 
     func panelCurrentScreen(panel: NSPanel) -> NSScreen {
         // Use the center of the visible content area (inset by shadowPadding) so the 12pt shadow
         // bleed below screen.frame.minY doesn't cause first(where:intersects) to return the wrong
         // adjacent screen in multi-monitor setups (e.g. vertically stacked 3-screen layouts).
+        // Sliding below a display must not reassign the bar to the display underneath it.
+        let frame = (dockVisibilityMotion != nil || dockVisibilityOffset != 0) ? lastDockTargetFrame : panel.frame
         let visualCenter = CGPoint(
-            x: panel.frame.midX,
-            y: panel.frame.minY + Self.shadowPadding + panelHeight / 2
+            x: frame.midX,
+            y: frame.minY + Self.shadowPadding + panelHeight / 2
         )
         return NSScreen.screens.first(where: { $0.frame.contains(visualCenter) })
             ?? NSScreen.screens.first(where: { $0.frame.intersects(panel.frame) })

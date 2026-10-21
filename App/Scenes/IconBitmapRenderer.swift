@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// Renders an icon at exactly the pixel size a chip draws it, so the layer shows it 1:1.
 ///
@@ -42,7 +43,8 @@ enum IconBitmapRenderer {
         guard let bitmap = context.makeImage() else { return nil }
         // Point size = pixels / scale, not `points`: the layer rounds its bounds to the pixel grid
         // the same way, which is what keeps the mapping 1:1.
-        let pointSize = NSSize(width: CGFloat(pixels) / displayScale, height: CGFloat(pixels) / displayScale)
+        let edge = IconRenditionChoice.alignedPoints(points: points, displayScale: displayScale)
+        let pointSize = NSSize(width: edge, height: edge)
         let image = NSImage(size: pointSize)
         let bitmapRep = NSBitmapImageRep(cgImage: bitmap)
         bitmapRep.size = pointSize
@@ -59,6 +61,7 @@ final class IconBitmapCache {
     private struct Key: Hashable {
         let name: String
         let pixels: Int
+        let displayScale: CGFloat
         let appearance: String
     }
 
@@ -73,12 +76,12 @@ final class IconBitmapCache {
                allowsRendering: Bool, source: () -> NSImage) -> NSImage {
         let appearanceName = appearance?.name.rawValue ?? ""
         let pixels = IconRenditionChoice.pixels(points: points, displayScale: displayScale)
-        let key = Key(name: name, pixels: pixels, appearance: appearanceName)
+        let key = Key(name: name, pixels: pixels, displayScale: displayScale, appearance: appearanceName)
         if let cached = bitmaps[key] { return cached }
-        let sizesKey = name + "|" + appearanceName
+        let sizesKey = name + "|" + appearanceName + "|" + String(Double(displayScale))
         if !allowsRendering,
            let standIn = IconRenditionChoice.standInPixels(rendered: renderedSizes[sizesKey] ?? [], target: pixels),
-           let cached = bitmaps[Key(name: name, pixels: standIn, appearance: appearanceName)] {
+           let cached = bitmaps[Key(name: name, pixels: standIn, displayScale: displayScale, appearance: appearanceName)] {
             return cached
         }
         let original = source()
@@ -92,5 +95,55 @@ final class IconBitmapCache {
         bitmaps[key] = rendered
         renderedSizes[sizesKey, default: []].append(pixels)
         return rendered
+    }
+}
+
+/// Draw the prepared bitmap once on the real window's backing-pixel grid. A fractional
+/// SwiftUI layout slot may remain fractional, but must not stretch the icon to fill it.
+struct PixelAlignedIcon: NSViewRepresentable {
+    let image: NSImage
+    let points: CGFloat
+
+    func makeNSView(context: Context) -> PixelAlignedIconDrawingView {
+        PixelAlignedIconDrawingView()
+    }
+
+    func updateNSView(_ view: PixelAlignedIconDrawingView, context: Context) {
+        guard view.image !== image || view.points != points else { return }
+        view.image = image
+        view.points = points
+        view.needsDisplay = true
+    }
+}
+
+final class PixelAlignedIconDrawingView: NSView {
+    var image: NSImage?
+    var points: CGFloat = 0
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image, points > 0, let context = NSGraphicsContext.current else { return }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let edge = IconRenditionChoice.alignedPoints(points: points, displayScale: scale)
+        let centered = NSRect(x: bounds.midX - edge / 2, y: bounds.midY - edge / 2,
+                              width: edge, height: edge)
+        let rect = backingAlignedRect(centered, options: .alignAllEdgesNearest)
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSBezierPath(roundedRect: rect, xRadius: edge / 4, yRadius: edge / 4).addClip()
+        let targetPixels = IconRenditionChoice.pixels(points: points, displayScale: scale)
+        let exactBitmap = image.representations.count == 1 && image.representations[0].pixelsWide == targetPixels
+        // A resize-drag stand-in may need scaling. A settled exact-size bitmap does not.
+        context.imageInterpolation = exactBitmap ? .none : .high
+        image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
 }

@@ -206,7 +206,7 @@ extension PanelCoordinator {
         applyPanelVisibility()
     }
 
-    private func updateEdgeIdleTimerFromMouse() {
+    func updateEdgeIdleTimerFromMouse() {
         guard EdgeAutoHideRuntimeRules.canArmIdleHide(state: visibilityState, delay: settingsStore.edgeAutoHideDelay) else { return }
 
         if isMouseOutsideInteractivePanels() {
@@ -221,6 +221,11 @@ extension PanelCoordinator {
 
     private func armEdgeIdleHideTimer() {
         guard let interval = EdgeAutoHideRuntimeRules.idleHideInterval(for: settingsStore.edgeAutoHideDelay) else { return }
+        if interval == 0 {
+            edgeIdleHideTimer?.invalidate()
+            edgeIdleHideTimerFired()
+            return
+        }
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in self?.edgeIdleHideTimerFired() }
         }
@@ -295,32 +300,42 @@ extension PanelCoordinator {
     func applyPanelVisibility() {
         guard !isSuspendedForPermissionLoss else { return }
         let shouldShow = visibilityState.isVisible
+        let fullscreenHide = !shouldShow && (
+            visibilityState.hideReasons.contains(.fullscreen)
+                || visibilityState.hideReasons.contains(.fullscreenTransitionPending))
+        if fullscreenHide, dockVisibilityMotion != nil {
+            cancelDockVisibilityAnimation()
+            orderDockSurfaceOut()
+            capsulePanel?.orderOut(nil)
+        }
         guard shouldShow != panelsAreVisible else { return }
         panelsAreVisible = shouldShow
         // 角标轮询的零感知门控跟着任务条逻辑显隐走（编排层按「任一单元可见」合并）；恢复时 BadgeStore 会立即读一次。
         onLogicalVisibilityChanged?(shouldShow)
         if Self.edgeHoverTraceEnabled { logEdgeHoverTrace(shouldShow: shouldShow) }
         if shouldShow {
-            // 全屏之后的回归淡入（owner 2026-08-30：硬弹出 vs 原生的入场动画）。
-            // 只给「因全屏藏过」的揭示做，边缘自动隐藏的唤出保持原来的即时手感。
-            let fadeIn = lastHideWasForFullscreen
+            let fullscreenReturn = lastHideWasForFullscreen
             lastHideWasForFullscreen = false
-            let fadingPanels = [dockGlassBackgroundPanel, dockPanel, capsulePanel].compactMap { $0 }
-            if fadeIn { for panel in fadingPanels { panel.alphaValue = 0 } }
-            orderDockSurfaceFront()
-            capsulePanel?.orderFrontRegardless()
-            if drawerWantsOpen { drawerPanel?.orderFrontRegardless() }
-            // 实测 orderOut/orderFront 不掉私有空间成员资格，这里只是一次读回；掉了才真的补。
-            pinResidentPanelsIfNeeded()
-            if fadeIn {
-                NSAnimationContext.runAnimationGroup { ctx in
-                    // 0.32s + ease-out（owner 2026-08-31「淡入再缓一些、更柔和」）：
-                    // 前半段就明显可见（感知上更及时），收尾轻。淡出维持 0.15s 不动。
-                    ctx.duration = 0.32
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    for panel in fadingPanels { panel.animator().alphaValue = 1 }
+            if fullscreenReturn {
+                cancelDockVisibilityAnimation()
+                let panels = [dockGlassBackgroundPanel, dockPanel, capsulePanel].compactMap { $0 }
+                let fade = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                for panel in panels { panel.alphaValue = fade ? 0 : 1 }
+                dockPanel?.ignoresMouseEvents = false
+                capsulePanel?.ignoresMouseEvents = false
+                orderDockAndCapsuleFront()
+                if fade {
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.32
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        for panel in panels { panel.animator().alphaValue = 1 }
+                    }
                 }
+            } else {
+                animateDockVisibility(show: true)
             }
+            if drawerWantsOpen { drawerPanel?.orderFrontRegardless() }
+            pinResidentPanelsIfNeeded()
             // 藏起来的这段时间里可能有全屏空间被销毁，系统会顺手把面板从别的桌面上摘掉
             // （issue #19）。健康时这里只是一次 SkyLight 读，不做任何事。
             repairAllSpacesMembershipIfNeeded()
@@ -329,11 +344,128 @@ extension PanelCoordinator {
             if lastHideWasForFullscreen { closeDrawer() }
             closeFolderPopup()
             dismissWindowTitleTooltip(suppressCurrentUntilExit: true)
-            orderDockSurfaceOut()
-            capsulePanel?.orderOut(nil)
-            // 淡入若被中途打断，alpha 可能停在半路；藏着的时候归 1，下次显示不带残值。
-            for panel in [dockGlassBackgroundPanel, dockPanel, capsulePanel] { panel?.alphaValue = 1 }
+            if fullscreenHide {
+                cancelDockVisibilityAnimation()
+                orderDockSurfaceOut()
+                capsulePanel?.orderOut(nil)
+            } else {
+                animateDockVisibility(show: false)
+            }
         }
+    }
+
+    var dockVisibilitySurfaceFrames: [(NSPanel, NSRect)] {
+        var frames: [(NSPanel, NSRect)] = []
+        if let background = dockGlassBackgroundPanel {
+            frames.append((background, DockLiquidGlassPanelGeometry.backgroundFrame(
+                for: lastDockTargetFrame, shadowPadding: Self.shadowPadding)))
+        }
+        if let dock = dockPanel { frames.append((dock, lastDockTargetFrame)) }
+        if settingsStore.showDrawer, let capsule = capsulePanel { frames.append((capsule, lastCapsuleTargetFrame)) }
+        return frames
+    }
+
+    /// Full frames remain the layout's source of truth. Only this presentation offset moves.
+    func renderDockVisibilityOffset() {
+        let pairs = dockVisibilitySurfaceFrames
+        let travel = layoutMetrics.panelHeight + layoutMetrics.bottomGap + Self.shadowPadding
+        let alpha = min(1, max(0, (travel + dockVisibilityOffset) / 12))
+        if let group = dockVisibilityWindowGroup {
+            group.apply(frames: pairs, offset: dockVisibilityOffset, alpha: alpha)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                for (panel, frame) in pairs {
+                    // Replace stale AppKit width/alpha animations even if their estimated
+                    // deadline expired during a busy main loop. Direct writes don't cancel them.
+                    panel.animator().setFrame(frame.offsetBy(dx: 0, dy: dockVisibilityOffset), display: false)
+                    panel.animator().alphaValue = alpha
+                }
+            }
+        }
+    }
+
+    func animateDockVisibility(show: Bool) {
+        guard let dock = dockPanel else { return }
+        dock.ignoresMouseEvents = !show
+        capsulePanel?.ignoresMouseEvents = !show
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            cancelDockVisibilityAnimation()
+            if show {
+                orderDockAndCapsuleFront()
+            } else {
+                orderDockSurfaceOut()
+                capsulePanel?.orderOut(nil)
+            }
+            return
+        }
+        let now = CACurrentMediaTime()
+        let travel = layoutMetrics.panelHeight + layoutMetrics.bottomGap + Self.shadowPadding
+        let start: DockVisibilitySpring.Sample
+        if let motion = dockVisibilityMotion {
+            // Continue from the state actually submitted to the windows, which may
+            // already be predicted for the next display time. Sampling wall time here
+            // would jump backwards when a flight is interrupted between callbacks.
+            start = .init(position: dockVisibilityOffset,
+                velocity: motion.sample(at: dockVisibilityTimeline.elapsedAtLastFrame).velocity)
+        } else {
+            // Retire any width animation before the presentation clock owns these windows.
+            settleRunningFrameAnimation()
+            start = .init(position: show ? -travel : 0, velocity: 0)
+        }
+        dockVisibilityMotion = DockVisibilitySpring(start: start, target: show ? 0 : -travel)
+        dockVisibilityOffset = start.position
+        renderDockVisibilityOffset()
+        if dockVisibilityWindowGroup == nil {
+            dockVisibilityWindowGroup = DockVisibilityWindowGroup(
+                root: dockGlassBackgroundPanel ?? dock, frames: dockVisibilitySurfaceFrames)
+        }
+        if show {
+            orderDockAndCapsuleFront()
+        }
+        // Preparation may synchronously lay out / paint / flush several windows. It
+        // must not consume animation time before the first display callback even exists.
+        let preparedAt = CACurrentMediaTime()
+        dockVisibilityTimeline.prepare(at: preparedAt, waitsForFirstFrame: dockVisibilityClock == nil)
+        if dockVisibilityClock == nil {
+            let clock = DockVisibilityAnimationClock { [weak self] frameTime in
+                self?.tickDockVisibility(at: frameTime)
+            }
+            dockVisibilityClock = clock
+            clock.start(on: panelCurrentScreen(panel: dock), preparationMs: (preparedAt - now) * 1000)
+        }
+    }
+
+    private func tickDockVisibility(at frameTime: CFTimeInterval) {
+        guard let motion = dockVisibilityMotion else { return }
+        let elapsed = dockVisibilityTimeline.advance(to: frameTime)
+        let settled = motion.isSettled(at: elapsed)
+        dockVisibilityOffset = settled ? motion.target : motion.sample(at: elapsed).position
+        // Submit the exact endpoint once, through the same window group as every
+        // other frame. Detaching first would re-submit each surface independently.
+        renderDockVisibilityOffset()
+        guard settled else { return }
+        if !panelsAreVisible {
+            dockVisibilityWindowGroup?.orderOutTogether()
+        }
+        dockVisibilityClock?.invalidate()
+        dockVisibilityClock = nil
+        dockVisibilityWindowGroup?.detach()
+        dockVisibilityWindowGroup = nil
+        dockVisibilityMotion = nil
+    }
+
+    /// Also used by fullscreen prediction and teardown: no delayed tick may resurrect panels.
+    func cancelDockVisibilityAnimation() {
+        dockVisibilityClock?.invalidate()
+        dockVisibilityClock = nil
+        dockVisibilityWindowGroup?.detach()
+        dockVisibilityWindowGroup = nil
+        guard dockVisibilityMotion != nil || dockVisibilityOffset != 0 else { return }
+        dockVisibilityMotion = nil
+        dockVisibilityOffset = 0
+        renderDockVisibilityOffset()
     }
 
     /// `DOCK_EDGEHOVER_TRACE=1` 时每次实际 SHOW/HIDE 切换打一行：单调时钟（`CACurrentMediaTime`，
@@ -368,8 +500,16 @@ extension PanelCoordinator {
 
     func isMouseOutsideInteractivePanels() -> Bool {
         let mouse = NSEvent.mouseLocation
-        if let dock = dockPanel, dock.frame.contains(mouse) { return false }
-        if let capsule = capsulePanel, capsule.frame.contains(mouse) { return false }
+        if let dock = dockPanel {
+            let interactiveFrame = PanelGeometry.dockInteractiveFrame(
+                restingDock: lastDockTargetFrame,
+                presentedDock: dock.frame,
+                restingCapsule: settingsStore.showDrawer && capsulePanel != nil ? lastCapsuleTargetFrame : nil,
+                presentedCapsule: settingsStore.showDrawer ? capsulePanel?.frame : nil,
+                shadowPadding: Self.shadowPadding,
+                screenBottom: panelCurrentScreen(panel: dock).frame.minY)
+            if interactiveFrame.contains(mouse) { return false }
+        }
         if drawerWantsOpen, let drawer = drawerPanel,
            PanelGeometry.folderPopupPlateFrame(panelFrame: drawer.frame).contains(mouse) { return false }
         if folderPopupContains(mouse) { return false }
@@ -381,5 +521,79 @@ extension PanelCoordinator {
             return false
         }
         return true
+    }
+}
+
+/// Display-synchronized on macOS 14+, with a common-run-loop fallback for 12/13.
+/// The callback holds the coordinator weakly, so the display link cannot keep it alive.
+@MainActor
+final class DockVisibilityAnimationClock: NSObject {
+    private var displayLink: AnyObject?
+    private var timer: Timer?
+    private let tick: (CFTimeInterval) -> Void
+    private var timing = DockAnimationTiming()
+    private var running = false
+    private var inTick = false
+    private var reported = false
+    private var preparationMs: Double = 0
+    private var maximumFPS = 0
+    private var clockStartedAt: CFTimeInterval = 0
+    private var firstCallbackDelayMs: Double = 0
+    private let performanceLog = Logger(subsystem: "com.caye.macosdockcc.v2", category: "animation-performance")
+
+    init(tick: @escaping (CFTimeInterval) -> Void) { self.tick = tick }
+
+    func start(on screen: NSScreen, preparationMs: Double) {
+        running = true
+        clockStartedAt = CACurrentMediaTime()
+        self.preparationMs = preparationMs
+        maximumFPS = screen.maximumFramesPerSecond
+        if #available(macOS 14.0, *) {
+            let link = screen.displayLink(target: self, selector: #selector(frameTick(_:)))
+            displayLink = link
+            link.add(to: .main, forMode: .common)
+        } else {
+            let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.renderTick(at: CACurrentMediaTime(), expectedInterval: 1.0 / 120)
+                }
+            }
+            self.timer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    @available(macOS 14.0, *)
+    @objc private func frameTick(_ link: CADisplayLink) {
+        // Use the scheduled presentation time, not the varying moment our callback
+        // happens to run. Motion then follows display cadence rather than scheduling jitter.
+        renderTick(at: link.targetTimestamp, expectedInterval: link.targetTimestamp - link.timestamp)
+    }
+
+    private func renderTick(at frameTime: CFTimeInterval, expectedInterval: TimeInterval) {
+        guard running else { return }
+        let began = CACurrentMediaTime()
+        if timing.frameCount == 0 { firstCallbackDelayMs = (began - clockStartedAt) * 1000 }
+        inTick = true
+        tick(frameTime)
+        timing.record(at: began, expectedInterval: expectedInterval, work: CACurrentMediaTime() - began)
+        inTick = false
+        if !running { report() }
+    }
+
+    func invalidate() {
+        running = false
+        if #available(macOS 14.0, *) { (displayLink as? CADisplayLink)?.invalidate() }
+        displayLink = nil
+        timer?.invalidate()
+        timer = nil
+        if !inTick { report() }
+    }
+
+    private func report() {
+        guard !reported else { return }
+        reported = true
+        // One summary per flight; no file writes or log messages on the per-frame path.
+        performanceLog.notice("flight frames=\(self.timing.frameCount) callbackFPS=\(self.timing.callbackFPS) screenMaxFPS=\(self.maximumFPS) maxGapMs=\(self.timing.maximumGap * 1000) maxWorkMs=\(self.timing.maximumWork * 1000) missedCallbacks=\(self.timing.missedCallbacks) prepareMs=\(self.preparationMs) firstCallbackDelayMs=\(self.firstCallbackDelayMs)")
     }
 }

@@ -8,8 +8,23 @@ import os
 // PanelCoordinator · 抽屉：开合、host 复用、拖动投放区几何、弹簧文件夹自动弹开。
 // 2026-09-05 从 PanelCoordinator.swift 按 extension 拆出，只搬不改。
 extension PanelCoordinator {
+    func drawerAvailabilityChanged() {
+        cancelSpringTimers()
+        dragController.cancelDrag()
+        closeDrawerImmediately()
+        capsulePanel?.orderOut(nil)
+        if !panelsAreVisible { orderDockSurfaceOut() }
+        cancelDockVisibilityAnimation()
+        capsulePanel?.ignoresMouseEvents = !settingsStore.showDrawer
+        relayout(animated: false)
+        if panelsAreVisible {
+            renderDockVisibilityOffset() // Restore a capsule left at alpha 0 by a prior hide.
+            orderDockAndCapsuleFront()
+        }
+    }
+
     func openDrawer() {
-        guard let mainPanel = dockPanel, capsulePanel != nil else { return }
+        guard settingsStore.showDrawer, let mainPanel = dockPanel, capsulePanel != nil else { return }
         onAccessoryWillOpen?(self, .drawer)
         drawerActionCloseToken += 1  // 旧点击排队的 delayed close 捕获旧 token，不匹配则丢弃
         drawerWantsOpen = true
@@ -141,7 +156,7 @@ extension PanelCoordinator {
     }
 
     private func makeDrawerRootView(limits: StackGridLayout.Limits) -> DrawerRootView {
-        DrawerRootView(limits: limits,
+        DrawerRootView(settingsStore: settingsStore, limits: limits,
                        arrow: drawerArrow,
                        showing: drawerShowing,
                        // Next main-loop turn: `fittingSize` reads zero inside the SwiftUI update
@@ -213,7 +228,7 @@ extension PanelCoordinator {
     /// 排在启动首帧事务之后 1 秒，不碰它。关着的抽屉视图活着不是新状态（③④ 下本来就有），拖拽回调都先问 `isDrawerOpen()`。
     func prewarmDrawerHost() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, !self.isSuspendedForPermissionLoss, self.drawerHosting == nil,
+            guard let self, self.settingsStore.showDrawer, !self.isSuspendedForPermissionLoss, self.drawerHosting == nil,
                   let mainPanel = self.dockPanel, self.capsulePanel != nil else { return }
             let anchor = self.drawerAnchor(on: self.panelCurrentScreen(panel: mainPanel))
             guard let host = self.ensureDrawerHost(limits: anchor.limits) else { return }
@@ -296,6 +311,7 @@ extension PanelCoordinator {
     }
 
     func dragDropZones(for source: DragSource) -> [CGRect] {
+        guard settingsStore.showDrawer else { return [] }
         // 读**目标** frame：动画中 live frame 是中途值,会和视觉/落点短暂错位（Codex 二审 P2）。目标未初始化时退回 live。
         func target(_ stored: NSRect, _ live: NSRect?) -> NSRect? { stored != .zero ? stored : live }
         switch source {
@@ -363,6 +379,7 @@ extension PanelCoordinator {
     }
 
     private func updateSpringLoad(location: CGPoint, payload: DragPayload?) {
+        guard settingsStore.showDrawer else { cancelSpringTimers(); return }
         // 整段拖动只要从任务条发起就享受弹簧（转正成 .drawer 后仍认这个标记）。消息区 chip 同享：
         // 悬胶囊自动弹开抽屉才有精确收纳落点。
         if let p = payload, p.source == .strip || p.source == .messaging {
@@ -440,7 +457,7 @@ extension PanelCoordinator {
         // isOverDropZone：转正成 .drawer 后它指的是任务条区,悬胶囊时为 false,会误拦重开。owner 2026-06-22）。
         let loc = dragController.globalLocation
         let inCapsule = lastCapsuleTargetFrame != .zero && springZone(lastCapsuleTargetFrame).contains(loc)
-        guard dragController.draggingPayload != nil,
+        guard settingsStore.showDrawer, dragController.draggingPayload != nil,
               dragOriginatedFromStrip,
               inCapsule,
               !drawerWantsOpen else { return }

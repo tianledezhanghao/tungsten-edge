@@ -1,7 +1,279 @@
+import AppKit
 import CoreGraphics
 import XCTest
 
 final class PanelGeometryTests: XCTestCase {
+    func testWindowPreparationAndFirstCallbackDelayDoNotSkipTheAnimationStart() {
+        var timeline = DockVisibilityTimeline()
+        timeline.prepare(at: 10, waitsForFirstFrame: true)
+        XCTAssertEqual(timeline.advance(to: 10.25), 0,
+            "Even a delayed first callback starts at the hidden pose, not 250ms ahead")
+        XCTAssertEqual(timeline.advance(to: 10.25 + 1.0 / 120), 1.0 / 120, accuracy: 0.000001)
+    }
+
+    func testReversingBeforeFirstCallbackStillWaitsForTheFirstFrame() {
+        var timeline = DockVisibilityTimeline()
+        timeline.prepare(at: 10, waitsForFirstFrame: true)
+        timeline.prepare(at: 10.03, waitsForFirstFrame: false)
+        XCTAssertEqual(timeline.advance(to: 10.2), 0)
+        XCTAssertEqual(timeline.advance(to: 10.2 + 1.0 / 60), 1.0 / 60, accuracy: 0.000001)
+    }
+
+    func testPredictedDisplayTimeDoesNotRewindWhenRetargetingBetweenFrames() {
+        var timeline = DockVisibilityTimeline()
+        timeline.prepare(at: 10, waitsForFirstFrame: true)
+        _ = timeline.advance(to: 10.02)
+        _ = timeline.advance(to: 10.03)
+        // Input arrives at wall time 10.025; the last submitted pose targets 10.03.
+        timeline.prepare(at: 10.025, waitsForFirstFrame: false)
+        XCTAssertEqual(timeline.advance(to: 10.04), 0.01, accuracy: 0.000001)
+    }
+
+    func testFrameTimingSeparatesCallbackGapsFromRenderingCost() {
+        var timing = DockAnimationTiming()
+        let interval = 1.0 / 120
+        timing.record(at: 0, expectedInterval: interval, work: 0.001)
+        timing.record(at: interval, expectedInterval: interval, work: 0.002)
+        timing.record(at: interval * 4, expectedInterval: interval, work: 0.012)
+        XCTAssertEqual(timing.frameCount, 3)
+        XCTAssertEqual(timing.missedCallbacks, 2)
+        XCTAssertEqual(timing.maximumGap, interval * 3, accuracy: 0.000001)
+        XCTAssertEqual(timing.maximumWork, 0.012)
+        XCTAssertEqual(timing.callbackFPS, 60, accuracy: 0.001)
+    }
+
+    func testFrameTimingAcceptsSteadySixtyAndOneTwentyHertz() {
+        for fps in [60.0, 120.0] {
+            var timing = DockAnimationTiming()
+            for frame in 0...120 {
+                timing.record(at: Double(frame) / fps, expectedInterval: 1 / fps, work: 0.0005)
+            }
+            XCTAssertEqual(timing.missedCallbacks, 0)
+            XCTAssertEqual(timing.callbackFPS, fps, accuracy: 0.001)
+        }
+    }
+
+    @MainActor
+    func testEverySurfaceIsOrderedInAfterRepeatedExplicitHide() {
+        _ = NSApplication.shared
+        // Transparent offscreen test windows: exercise native ordering without showing UI.
+        let frames = [CGRect(x: -10000, y: -10000, width: 400, height: 54),
+                      CGRect(x: -10020, y: -10020, width: 440, height: 94),
+                      CGRect(x: -9592, y: -10020, width: 94, height: 94)]
+        let panels = frames.map { frame in
+            let panel = NonConstrainingPanel(contentRect: frame,
+                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            panel.isReleasedWhenClosed = false
+            panel.alphaValue = 0
+            return panel
+        }
+        defer { panels.forEach { $0.close() } }
+        let pairs = Array(zip(panels, frames))
+        for cycle in 0..<20 {
+            let group = DockVisibilityWindowGroup(root: panels[0], frames: pairs)
+            group.orderFrontTogether()
+            for panel in panels {
+                XCTAssertTrue(panel.isVisible, "Every surface must be ordered in before tick 1, cycle \(cycle)")
+                XCTAssertEqual(panel.alphaValue, 0, "Preparing must never expose a partial group")
+            }
+            group.apply(frames: pairs, offset: -20, alpha: 0)
+            // Retargeting an unfinished flight must not reorder or hide an individual child.
+            group.orderFrontTogether()
+            XCTAssertTrue(panels.allSatisfy(\.isVisible))
+            group.orderOutTogether()
+            group.detach()
+            XCTAssertTrue(panels.allSatisfy { !$0.isVisible })
+            // Match the old lifecycle: explicit child orderOut must be recoverable too.
+            panels.forEach { $0.orderOut(nil) }
+        }
+    }
+
+    @MainActor
+    func testVisibilityWindowGroupStaysTogetherThroughRapidReversals() {
+        _ = NSApplication.shared
+        let frames = [CGRect(x: 100, y: 8, width: 600, height: 54),
+                      CGRect(x: 80, y: -12, width: 640, height: 94),
+                      CGRect(x: 708, y: -12, width: 94, height: 94)]
+        let panels = frames.map { frame in
+            let panel = NonConstrainingPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel],
+                                             backing: .buffered, defer: false)
+            panel.isReleasedWhenClosed = false
+            return panel
+        }
+        let pairs = Array(zip(panels, frames))
+        let group = DockVisibilityWindowGroup(root: panels[0], frames: pairs)
+        defer {
+            group.detach()
+            panels.forEach { $0.close() }
+        }
+        XCTAssertTrue(panels[1].parent === panels[0])
+        XCTAssertTrue(panels[2].parent === panels[0])
+        var spring = DockVisibilitySpring(start: .init(position: -82, velocity: 0), target: 0)
+        for reversal in 0..<40 {
+            let interruptTime = [0.025, 0.06, 0.13, 0.035][reversal % 4]
+            for frame in 0...5 {
+                let sample = spring.sample(at: interruptTime * Double(frame) / 5)
+                group.apply(frames: pairs, offset: sample.position, alpha: 1)
+                // NSWindow quantizes offscreen origins. The invariant is that ALL
+                // surfaces receive exactly the same actual displacement, including rounding.
+                let actualOffset = panels[0].frame.minY - frames[0].minY
+                XCTAssertEqual(actualOffset, sample.position, accuracy: 1)
+                for (panel, resting) in pairs {
+                    XCTAssertEqual(panel.frame.minY - resting.minY, actualOffset, accuracy: 0.01)
+                    XCTAssertEqual(panel.frame.minX, resting.minX, accuracy: 0.01)
+                }
+            }
+            spring = DockVisibilitySpring(start: spring.sample(at: interruptTime),
+                                          target: reversal.isMultiple(of: 2) ? -82 : 0)
+        }
+        group.apply(frames: pairs, offset: -82, alpha: 0)
+        group.detach()
+        XCTAssertNil(panels[1].parent)
+        XCTAssertNil(panels[2].parent)
+        for (panel, resting) in pairs {
+            XCTAssertEqual(panel.alphaValue, 0)
+            XCTAssertEqual(panel.frame.minY, resting.minY - 82, accuracy: 0.01)
+        }
+    }
+
+    @MainActor
+    func testVisibilityWindowGroupResizesAndReattachesWithoutJumping() {
+        _ = NSApplication.shared
+        let root = NonConstrainingPanel(contentRect: CGRect(x: 100, y: 8, width: 400, height: 54),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let capsule = NonConstrainingPanel(contentRect: CGRect(x: 508, y: 8, width: 54, height: 54),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        root.isReleasedWhenClosed = false
+        capsule.isReleasedWhenClosed = false
+        defer { root.close(); capsule.close() }
+        var pairs = [(root as NSPanel, root.frame), (capsule as NSPanel, capsule.frame)]
+        let group = DockVisibilityWindowGroup(root: root, frames: pairs)
+        pairs[0].1.size.width = 500
+        pairs[1].1.origin.x += 100
+        group.apply(frames: pairs, offset: -40, alpha: 1)
+        XCTAssertEqual(capsule.frame.minX, 608, accuracy: 0.01)
+        XCTAssertEqual(capsule.frame.minY, -32, accuracy: 0.01)
+        group.apply(frames: pairs, offset: -82, alpha: 0)
+        group.detach()
+        let next = DockVisibilityWindowGroup(root: root, frames: pairs)
+        defer { next.detach() }
+        next.apply(frames: pairs, offset: -70, alpha: 1)
+        XCTAssertEqual(root.frame.minY, -62, accuracy: 0.01)
+        XCTAssertEqual(capsule.frame.minY, -62, accuracy: 0.01)
+    }
+
+    func testDockWakeCorridorHasNoGapAtAnyBottomSpacing() {
+        for bottom: CGFloat in [0, -900] {
+            for gap: CGFloat in [0, 3, 4, 8, 16, 32] {
+                let dock = CGRect(x: 100, y: bottom + gap - 20, width: 440, height: 94)
+                let capsule = CGRect(x: 508, y: bottom + gap - 20, width: 94, height: 94)
+                for offset: CGFloat in [-74 - gap, -40, -5, 0] {
+                    let region = PanelGeometry.dockInteractiveFrame(
+                        restingDock: dock, presentedDock: dock.offsetBy(dx: 0, dy: offset),
+                        restingCapsule: capsule, presentedCapsule: capsule.offsetBy(dx: 0, dy: offset),
+                        shadowPadding: 20, screenBottom: bottom)
+                    // Continuous edge → gap → moving plate → resting plate, including
+                    // the bridge to the capsule. Genuine exits still hide immediately.
+                    for x: CGFloat in [121, 519, 550] {
+                        for dy in stride(from: CGFloat(0), through: gap + 53, by: 0.5) {
+                            XCTAssertTrue(region.contains(CGPoint(x: x, y: bottom + dy)), "gap=\(gap), offset=\(offset), dy=\(dy)")
+                        }
+                    }
+                    XCTAssertFalse(region.contains(CGPoint(x: 119, y: bottom + gap + 5)))
+                    XCTAssertFalse(region.contains(CGPoint(x: 150, y: bottom + gap + 55)))
+                }
+            }
+        }
+    }
+
+    func testWakeCorridorAlsoIncludesTheMovingPlateBelowDestination() {
+        let resting = CGRect(x: 100, y: 12, width: 440, height: 94)
+        let region = PanelGeometry.dockInteractiveFrame(
+            restingDock: resting, presentedDock: resting.offsetBy(dx: 0, dy: -30),
+            restingCapsule: nil, presentedCapsule: nil, shadowPadding: 20, screenBottom: 0)
+        XCTAssertTrue(region.contains(CGPoint(x: 130, y: 10)))
+        XCTAssertTrue(region.contains(CGPoint(x: 130, y: 33)))
+        XCTAssertFalse(region.contains(CGPoint(x: 130, y: -1)))
+    }
+
+    @MainActor
+    func testRevealFinishesBeforeQuantizedSpringTailAndDetachesAtEndpoint() {
+        _ = NSApplication.shared
+        let root = NonConstrainingPanel(contentRect: CGRect(x: 100, y: 8, width: 400, height: 54),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let child = NonConstrainingPanel(contentRect: CGRect(x: 508, y: 8, width: 54, height: 54),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        root.isReleasedWhenClosed = false
+        child.isReleasedWhenClosed = false
+        defer { root.close(); child.close() }
+        let frames: [(NSPanel, CGRect)] = [(root, root.frame), (child, child.frame)]
+        for travel: CGFloat in [52, 82, 172] {
+            for fps in [60, 120] {
+                let group = DockVisibilityWindowGroup(root: root, frames: frames)
+                let motion = DockVisibilitySpring(start: .init(position: -travel, velocity: 0), target: 0)
+                var finishedAt: Double?
+                for tick in 0...fps {
+                    let elapsed = Double(tick) / Double(fps)
+                    let done = motion.isSettled(at: elapsed)
+                    group.apply(frames: frames, offset: done ? 0 : motion.sample(at: elapsed).position, alpha: 1)
+                    if done { finishedAt = elapsed; break }
+                }
+                XCTAssertLessThanOrEqual(finishedAt ?? 1, 0.25, "Do not chase the invisible exponential tail")
+                for (panel, frame) in frames { XCTAssertEqual(panel.frame, frame) }
+                group.detach()
+                for (panel, frame) in frames { XCTAssertEqual(panel.frame, frame) }
+            }
+        }
+    }
+
+    func testDockRevealStopsWithoutOvershoot() {
+        for travel: CGFloat in [52, 82, 172] {
+            let spring = DockVisibilitySpring(start: .init(position: -travel, velocity: 0), target: 0)
+            let samples = (0...120).map { spring.sample(at: Double($0) / 120).position }
+            XCTAssertLessThanOrEqual(samples.max()!, 0, "The bar must never move beyond its resting edge")
+            for (previous, next) in zip(samples, samples.dropFirst()) {
+                XCTAssertGreaterThanOrEqual(next, previous, "Arrival must not reverse after reaching the top")
+            }
+            XCTAssertEqual(spring.sample(at: 0).position, -travel)
+            XCTAssertTrue(spring.isSettled(at: 0.55))
+        }
+    }
+
+    func testRapidVisibilityReversalsNeverCrossEitherEndpoint() {
+        let hidden: CGFloat = -82
+        var spring = DockVisibilitySpring(start: .init(position: hidden, velocity: 0), target: 0)
+        for turn in 0..<60 {
+            let duration = [0.02, 0.08, 0.18, 0.3][turn % 4]
+            for tick in 0...60 {
+                let position = spring.sample(at: duration * Double(tick) / 60).position
+                XCTAssertGreaterThanOrEqual(position, hidden - 0.000001)
+                XCTAssertLessThanOrEqual(position, 0.000001)
+            }
+            spring = DockVisibilitySpring(start: spring.sample(at: duration),
+                                          target: turn.isMultiple(of: 2) ? hidden : 0)
+        }
+    }
+
+    func testMagneticVisibilityReversalPreservesPositionAndVelocity() {
+        let reveal = DockVisibilitySpring(start: .init(position: -82, velocity: 0), target: 0)
+        let interrupted = reveal.sample(at: 0.08)
+        let hide = DockVisibilitySpring(start: interrupted, target: -82)
+        XCTAssertEqual(hide.sample(at: 0).position, interrupted.position, accuracy: 0.000001)
+        XCTAssertEqual(hide.sample(at: 0).velocity, interrupted.velocity, accuracy: 0.000001)
+        XCTAssertLessThan(abs(hide.sample(at: 0.001).position - interrupted.position), 1)
+        XCTAssertEqual(hide.sample(at: 1).position, -82, accuracy: 0.001)
+    }
+
+    func testMagneticShowAndHideUseTheSameTiming() {
+        let reveal = DockVisibilitySpring(start: .init(position: -82, velocity: 0), target: 0)
+        let hide = DockVisibilitySpring(start: .init(position: 0, velocity: 0), target: -82)
+        for tick in 0...120 {
+            let t = Double(tick) / 120
+            XCTAssertEqual(reveal.sample(at: t).position + hide.sample(at: t).position, -82, accuracy: 0.000001)
+            XCTAssertEqual(reveal.isSettled(at: t), hide.isSettled(at: t))
+        }
+    }
+
     private let metrics = PanelLayoutMetrics.tungstenEdge
 
     func testBottomDockVisibleFrameChangeDoesNotMoveBottomPanelsVertically() {

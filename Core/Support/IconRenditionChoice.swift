@@ -23,6 +23,11 @@ enum IconRenditionChoice {
         max(1, Int((points * displayScale).rounded()))
     }
 
+    /// The final drawing edge must match the cached bitmap's integral pixel edge.
+    static func alignedPoints(points: CGFloat, displayScale: CGFloat) -> CGFloat {
+        CGFloat(pixels(points: points, displayScale: displayScale)) / displayScale
+    }
+
     /// Index of the rendition to downsample from, mirroring IconServices: the **smallest point
     /// size** that covers the target (its artwork is the one drawn for sizes near the target),
     /// among those the one drawn for the same display scale, else the most pixels. A rendition

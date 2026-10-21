@@ -85,9 +85,9 @@ struct DockLiquidGlassConfiguration: Equatable {
     /// 背景窗口根图层的黑底不透明度。**不是观感参数**：WindowServer 需要一块非零 alpha 的
     /// 形状才肯对这个窗口做背景模糊，这是给它的最小锚点。
     let backgroundPlateOpacity: Double
-    /// Private `NSGlassEffectView` variant the plate is rendered with. **3 is the material the
-    /// native Dock itself uses**: plate colour, the backdrop-coloured 1px rim and the dark
-    /// "thickness" line on the left all come with it and match the Dock to within ±2.
+    /// Private `NSGlassEffectView` variant for the legacy classic plate. Historical
+    /// comments identified 3 with the system Dock, but this is not verified for the
+    /// current OS. It is not a public API guarantee. The raw variant 3 choice omits classic enhancements.
     ///
     /// `nil` (`DOCK_LIQUID_GLASS_SYSTEM_VARIANT=off`, or the private selector gone) falls back to
     /// the SwiftUI `.glassEffect(.clear)` plate below — every other field in this struct describes

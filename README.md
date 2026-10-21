@@ -43,7 +43,7 @@ The drawer, unread badges for messaging apps, pinned folders, a taskbar on every
 - **Drag to organize** — reorder cards by dragging; drag a card into the drawer to stash it; drag it back out and it lands exactly where you drop it.
 - **Pinned folders, like Dock stacks** — pin any folder beside the Trash (a fresh install starts with Downloads there). Click it to see its contents as a Fan, Grid or List — or Automatic, as on the Dock — chosen per folder from its right-click menu, with the Dock's own open and close animations.
 - **Menu bar and Settings** — the status menu holds Open at Login, the wake delays for the Dock and for Tungsten Edge, and the handful of appearance preferences you reach for while tuning the bar (which screen it shows on, taskbar size, Show Shelf, hover names, maximized-window avoidance); language, shortcuts, feedback, licensing and update checking live in the settings window.
-- **Edge auto-hide** — Tungsten Edge is **always visible by default**; it can also hide itself and wake from the bottom edge after the delay you choose, hiding again about 0.2s after you move away. The tier lives on the Tungsten Edge slider in the status menu, and `⌥⇧⌘D` toggles between always-visible and your last auto-hide delay.
+- **Edge auto-hide** — Tungsten Edge is **always visible by default**; it can also hide itself and wake from the bottom edge after the delay you choose, starting its retraction immediately when you move away. The tier lives on the Tungsten Edge slider in the status menu, and `⌥⇧⌘D` toggles between always-visible and your last auto-hide delay.
 - **Frosted-glass look** — native-grade translucency that blends into the desktop.
 - **Multi-display** — one taskbar that follows your pointer between screens, or **one taskbar per display**. With one per display, each bar can list **only the windows sitting on that display**; drag a window card from one display's bar onto another's and the window moves across with it, without being forced to the front.
 - **Blink-free native full-screen entry** — before a standard green-button or `Control-Command-F` full-screen transition, Tungsten Edge moves its panels out of the transition snapshot. This is enabled by default and can be turned off in Settings.
@@ -214,9 +214,12 @@ The names "Tungsten Edge" and "钨极" and the logo are trademarks and are not c
 
 Release notes for every version are archived under [`Docs/Archive/Releases/`](Docs/Archive/Releases).
 
-**Build & run** (kills any running instance, builds Debug, re-signs, launches — never run a bare `xcodebuild` + `open`, the app's Accessibility grant follows the signing identity):
+**Local signing setup.** First follow [local development signing](Docs/local-development.md) to create and trust the persistent self-signed code-signing identity `macos-dock-cc Local Code Signing` in your login keychain. No paid developer account is required. Debug uses its own bundle ID and Accessibility grant and never overwrites `/Applications/Tungsten Edge.app`.
+
+**Build & run** (checks the identity, builds and verifies signatures, then restarts only this checkout's Debug app):
 
 ```bash
+./Scripts/build_and_run.sh --build  # build and sign only; no launch
 ./Scripts/build_and_run.sh          # dev loop
 ./Scripts/build_and_run.sh --lab    # window-lab diagnostic CLI
 ```

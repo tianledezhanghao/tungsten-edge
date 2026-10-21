@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import Combine
 import SwiftUI
 
@@ -53,13 +54,14 @@ struct PanelHeightResizeModifier: ViewModifier {
 @MainActor
 final class ManualPanelHost {
     let contentView: NSView
+    private let container: NSView
 
     init(contentView: NSView, in panel: NSPanel) {
         self.contentView = contentView
 
         let initialSize = panel.contentView?.bounds.size
             ?? panel.contentRect(forFrameRect: panel.frame).size
-        let container = NSView(frame: NSRect(origin: .zero, size: initialSize))
+        container = NSView(frame: NSRect(origin: .zero, size: initialSize))
         panel.contentView = container
 
         contentView.frame = container.bounds
@@ -139,4 +141,79 @@ final class DockLiquidGlassPanel: NonConstrainingPanel {
 
     @objc(_hasActiveControls)
     func bestDockHasActiveControls() -> Bool { true }
+}
+
+/// One native window tree for one visibility flight. AppKit carries the child windows
+/// with the root; three independent setFrame calls cannot guarantee the same server frame.
+@MainActor
+final class DockVisibilityWindowGroup {
+    let root: NSPanel
+    private let children: [NSPanel]
+    private var restingFrames: [NSRect]
+
+    init(root: NSPanel, frames: [(NSPanel, NSRect)]) {
+        self.root = root
+        self.children = frames.map(\.0).filter { $0 !== root }
+        self.restingFrames = frames.map(\.1)
+        for child in children { root.addChildWindow(child, ordered: .above) }
+    }
+
+    func orderFrontTogether() {
+        let panels = [root] + children
+        // A child explicitly ordered out on the preceding hide is NOT guaranteed to
+        // return when only its parent is ordered in. Establish visibility for every
+        // surface while transparent, and prepare their content before the first tick.
+        guard panels.contains(where: { !$0.isVisible }) else { return }
+        let alphas = panels.map(\.alphaValue)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            for panel in panels { panel.alphaValue = 0 }
+            for panel in panels {
+                panel.orderFrontRegardless()
+                panel.layoutIfNeeded()
+                panel.contentView?.layoutSubtreeIfNeeded()
+                panel.displayIfNeeded()
+            }
+        }
+        CATransaction.flush()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            for (panel, alpha) in zip(panels, alphas) { panel.alphaValue = alpha }
+        }
+    }
+
+    func orderOutTogether() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            // Keep every surface transparent until the next prepared reveal.
+            for panel in [root] + children { panel.alphaValue = 0 }
+            for panel in children { panel.orderOut(nil) }
+            root.orderOut(nil)
+        }
+    }
+
+    func apply(frames: [(NSPanel, NSRect)], offset: CGFloat, alpha: CGFloat) {
+        let targets = frames.map(\.1)
+        guard let rootFrame = frames.first(where: { $0.0 === root })?.1 else { return }
+        let geometryChanged = restingFrames != targets
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            context.allowsImplicitAnimation = false
+            // Moving the root is the ONLY position write on an ordinary animation tick.
+            root.setFrame(rootFrame.offsetBy(dx: 0, dy: offset), display: false)
+            if geometryChanged {
+                for (panel, frame) in frames where panel !== root {
+                    panel.setFrame(frame.offsetBy(dx: 0, dy: offset), display: false)
+                }
+            }
+            // Alpha is 1 for most of the flight. Avoid three redundant compositor writes
+            // on every refresh once the short screen-edge fade has finished.
+            for (panel, _) in frames where panel.alphaValue != alpha { panel.alphaValue = alpha }
+        }
+        restingFrames = targets
+    }
+
+    func detach() {
+        for child in children where child.parent === root { root.removeChildWindow(child) }
+    }
 }

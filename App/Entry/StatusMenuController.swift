@@ -14,6 +14,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     /// 任务条会从弹出的菜单底下缩掉（同 `folderPopupOpen`）。走闭包是因为
     /// `PanelCoordinator` 在权限引导完成前根本不存在。
     private let onMenuVisibilityChanged: (Bool) -> Void
+    private let onRestart: () -> Void
     private let onQuit: () -> Void
     /// 当前显隐快捷键的展示字形。走闭包现取：用户改键后组标题要在下次打开时跟着变。
     private let hotKeyGlyphs: () -> String
@@ -78,6 +79,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     /// 下面四条是普通勾选项，**恒在**（菜单开着时不许增删行），勾选状态由 refreshCheckmarks 落。
     private let showShelfItem = NSMenuItem(title: String(localized: "Show Shelf"), action: #selector(toggleShowShelf), keyEquivalent: "")
     private let showTrashItem = NSMenuItem(title: String(localized: "Show Trash"), action: #selector(toggleShowTrash), keyEquivalent: "")
+    private let hoverMagnificationItem = NSMenuItem(title: String(localized: "Magnify taskbar icons on hover"), action: #selector(toggleHoverMagnification), keyEquivalent: "")
     private let hoverNameItem = NSMenuItem(title: String(localized: "Show app name on hover"), action: #selector(toggleHoverName), keyEquivalent: "")
     private let windowLiftItem = NSMenuItem(title: String(localized: "Keep maximized windows above the taskbar"), action: #selector(toggleWindowLift), keyEquivalent: "")
     private let nativeDockSliderView: PreferenceSliderMenuItemView
@@ -93,6 +95,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
          onExportDebugSnapshot: @escaping () -> Void,
          onShowSettings: @escaping () -> Void,
          onMenuVisibilityChanged: @escaping (Bool) -> Void = { _ in },
+         onRestart: @escaping () -> Void,
          onQuit: @escaping () -> Void,
          hotKeyGlyphs: @escaping () -> String,
          isToggleHotKeyRegistered: @escaping () -> Bool = { false },
@@ -104,6 +107,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         self.onExportDebugSnapshot = onExportDebugSnapshot
         self.onShowSettings = onShowSettings
         self.onMenuVisibilityChanged = onMenuVisibilityChanged
+        self.onRestart = onRestart
         self.onQuit = onQuit
         self.hotKeyGlyphs = hotKeyGlyphs
         self.isToggleHotKeyRegistered = isToggleHotKeyRegistered
@@ -266,6 +270,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(showShelfItem)
         showTrashItem.target = self
         menu.addItem(showTrashItem)
+        hoverMagnificationItem.target = self
+        menu.addItem(hoverMagnificationItem)
         hoverNameItem.target = self
         menu.addItem(hoverNameItem)
         windowLiftItem.target = self
@@ -300,6 +306,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         installUpdateItem.target = self
         installUpdateItem.isHidden = true
         menu.addItem(installUpdateItem)
+
+        let restartItem = NSMenuItem(title: String(localized: "Restart Tungsten Edge"), action: #selector(restart), keyEquivalent: "")
+        restartItem.target = self
+        menu.addItem(restartItem)
 
         let quitItem = NSMenuItem(title: String(localized: "Quit Tungsten Edge"), action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
@@ -497,6 +507,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private func refreshTaskbarPreferenceStates() {
         showShelfItem.state = store.showShelf ? .on : .off
         showTrashItem.state = store.showTrash ? .on : .off
+        hoverMagnificationItem.state = store.hoverMagnificationEnabled ? .on : .off
         hoverNameItem.state = store.hoverStyle.isExpressive ? .on : .off
         windowLiftItem.state = store.windowLiftEnabled ? .on : .off
     }
@@ -702,6 +713,10 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     /// 悬停显示应用名 = `hoverStyle` 的两档（`.standard` 显示 / `.quiet` 不显示），
     /// 不是独立的布尔字段——设置窗口那版也是这么读写的，别在这里另开一个镜像。
+    @objc private func toggleHoverMagnification() {
+        store.setHoverMagnificationEnabled(!store.hoverMagnificationEnabled)
+    }
+
     @objc private func toggleHoverName() {
         store.setHoverStyle(store.hoverStyle.isExpressive ? .quiet : .standard)
         refreshCheckmarks()
@@ -774,5 +789,6 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.cancelTrackingWithoutAnimation()
         DispatchQueue.main.async { [onShowSettings] in onShowSettings() }
     }
+    @objc private func restart() { onRestart() }
     @objc private func quit() { onQuit() }
 }

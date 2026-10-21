@@ -21,6 +21,83 @@ final class KeptAppPositionTests: XCTestCase {
         )
     }
 
+    func testUnpinnedRunningFallbackKeepsItsSeatAcrossWindowInventoryLoss() {
+        let store = makeStore(timeBox: TimeBox(Date()))
+        let first = ["w-a", "w-b", "w-c"]
+        store.sync(current: first, appKeyOf: ["w-a": "a", "w-b": "b", "w-c": "c"])
+        store.reorder(draggedID: "w-c", relativeTo: "w-a", after: false, current: first)
+        let missing = ["w-a", "w-c", "app-b"]
+        let missingKeys = ["w-a": "a", "w-c": "c", "app-b": "b"]
+        store.sync(current: missing, appKeyOf: missingKeys)
+        XCTAssertEqual(store.reconciled(current: missing, appKeyOf: missingKeys), ["w-c", "w-a", "app-b"])
+        let restored = ["w-b-new", "w-a", "w-c"]
+        let restoredKeys = ["w-a": "a", "w-c": "c", "w-b-new": "b"]
+        store.sync(current: restored, appKeyOf: restoredKeys)
+        XCTAssertEqual(store.reconciled(current: restored, appKeyOf: restoredKeys), ["w-c", "w-a", "w-b-new"])
+    }
+
+    func testSnapshotPermutationAndLongAbsenceCannotChangeVisibleOrder() {
+        let clock = TimeBox(Date())
+        let store = makeStore(timeBox: clock)
+        let keys = ["tabgrp-a": "a", "tabgrp-b": "b", "tabgrp-c": "c"]
+        store.sync(current: ["tabgrp-a", "tabgrp-b", "tabgrp-c"], appKeyOf: keys)
+        store.reorder(draggedID: "tabgrp-c", relativeTo: "tabgrp-a", after: false,
+                      current: ["tabgrp-a", "tabgrp-b", "tabgrp-c"])
+        for snapshot in [["tabgrp-b", "tabgrp-c", "tabgrp-a"], ["tabgrp-a", "tabgrp-b"], []] {
+            store.sync(current: snapshot, appKeyOf: keys)
+        }
+        clock.time = clock.time.addingTimeInterval(3600)
+        store.sync(current: ["tabgrp-b", "tabgrp-a"], appKeyOf: keys)
+        let restored = ["tabgrp-a", "tabgrp-b", "tabgrp-c-new"]
+        let restoredKeys = keys.merging(["tabgrp-c-new": "c"]) { _, new in new }
+        XCTAssertEqual(store.reconciled(current: restored, appKeyOf: restoredKeys), ["tabgrp-c-new", "tabgrp-a", "tabgrp-b"])
+        store.sync(current: restored, appKeyOf: restoredKeys)
+        XCTAssertEqual(store.reconciled(current: restored, appKeyOf: restoredKeys), ["tabgrp-c-new", "tabgrp-a", "tabgrp-b"])
+    }
+
+    func testOrdinaryAppSlotsSurviveRelaunchAndRebootAndNewAppsAppend() {
+        let defaults = UserDefaults(suiteName: "test-locked-app-order-\(UUID().uuidString)")!
+        func make(_ boot: Int) -> StripOrderStore {
+            StripOrderStore(defaults: defaults, bootTimeProvider: { boot })
+        }
+        let store = make(1)
+        store.sync(current: ["tabgrp-a", "tabgrp-b", "tabgrp-c"], appKeyOf: ["tabgrp-a": "a", "tabgrp-b": "b", "tabgrp-c": "c"])
+        store.reorder(draggedID: "tabgrp-c", relativeTo: "tabgrp-a", after: false, current: ["tabgrp-a", "tabgrp-b", "tabgrp-c"])
+        let reloaded = make(1)
+        reloaded.sync(current: ["tabgrp-b"], appKeyOf: ["tabgrp-b": "b"])
+        XCTAssertEqual(reloaded.reconciled(current: ["tabgrp-a-new", "tabgrp-b", "tabgrp-c-new"], appKeyOf: ["tabgrp-a-new": "a", "tabgrp-b": "b", "tabgrp-c-new": "c"]), ["tabgrp-c-new", "tabgrp-a-new", "tabgrp-b"])
+        let rebooted = make(2)
+        XCTAssertTrue(rebooted.liveOrder.isEmpty, "Never reuse raw window seats across boots")
+        rebooted.sync(current: ["b2"], appKeyOf: ["b2": "b"])
+        let current = ["b2", "d2", "a2", "c2"]
+        let keys = ["a2": "a", "b2": "b", "c2": "c", "d2": "d"]
+        XCTAssertEqual(rebooted.reconciled(current: current, appKeyOf: keys), ["c2", "a2", "b2", "d2"])
+        rebooted.sync(current: current, appKeyOf: keys)
+        XCTAssertEqual(rebooted.reconciled(current: current, appKeyOf: keys), ["c2", "a2", "b2", "d2"])
+    }
+
+    func testMovingAnAppAlsoMovesItsAbsentSeatMemory() {
+        let store = makeStore(timeBox: TimeBox(Date()))
+        store.sync(current: ["old-a", "b"], appKeyOf: ["old-a": "a", "b": "b"])
+        store.sync(current: ["new-a", "b"], appKeyOf: ["new-a": "a", "b": "b"])
+        store.reorder(draggedID: "new-a", relativeTo: "b", after: true, current: ["new-a", "b"])
+        store.sync(current: ["b"], appKeyOf: ["b": "b"])
+        XCTAssertEqual(store.reconciled(current: ["a3", "b"], appKeyOf: ["a3": "a", "b": "b"]), ["b", "a3"])
+    }
+
+    func testCancelledDrawerPlacementRestoresRememberedOrderAndNewWindowInheritance() {
+        let store = makeStore(timeBox: TimeBox(Date()))
+        store.sync(current: ["old-a", "b"], appKeyOf: ["old-a": "a", "b": "b"])
+        store.sync(current: ["b"], appKeyOf: ["b": "b"])
+        store.stageExternalBlock(bundleID: "a", relativeTo: "b", after: true)
+        store.sync(current: ["b"], appKeyOf: ["b": "b"])
+        XCTAssertEqual(store.liveOrder, ["old-a", "b"], "Missing seats must not materialize a drawer conversion")
+        store.sync(current: ["b", "new-a"], appKeyOf: ["b": "b", "new-a": "a"])
+        XCTAssertEqual(store.reconciled(current: ["b", "new-a"], appKeyOf: ["b": "b", "new-a": "a"]), ["b", "new-a"])
+        store.cancelExternalBlock()
+        XCTAssertEqual(store.reconciled(current: ["a3", "b"], appKeyOf: ["a3": "a", "b": "b"]), ["a3", "b"])
+    }
+
     // MARK: - a. app exit → tabgrp-* grace → app-* placeholder → position = rightmost tabgrp-*
 
     func testExitPlaceholderInheritsRightmostWindowPosition() {
@@ -42,7 +119,7 @@ final class KeptAppPositionTests: XCTestCase {
 
     // MARK: - b. grace expires → tabgrp-* gone → placeholder keeps position
 
-    func testGraceExpiresPlaceholderStaysInPlace() {
+    func testLongAbsenceRetainsWindowSeatsAndPlaceholderPosition() {
         let timeBox = TimeBox(Date())
         let store = makeStore(timeBox: timeBox)
         // com.app 两窗在左、com.other 一窗在右——占位"保持原位"= 停在 com.other 左边
@@ -58,8 +135,8 @@ final class KeptAppPositionTests: XCTestCase {
         timeBox.time = Date().addingTimeInterval(6)
         store.sync(current: ["app-com.app", "tabgrp-300-s1"],
                    appKeyOf: ["app-com.app": "com.app", "tabgrp-300-s1": "com.other"])
-        // 宽限过期：tabgrp-100-* 真正离开 liveOrder，占位留在原位（com.other 左边）
-        XCTAssertEqual(store.liveOrder, ["app-com.app", "tabgrp-300-s1"])
+        // Missing window seats remain remembered even after the former five-second timeout.
+        XCTAssertEqual(store.liveOrder, ["tabgrp-100-s1", "tabgrp-100-s2", "app-com.app", "tabgrp-300-s1"])
         XCTAssertEqual(store.reconciled(current: ["app-com.app", "tabgrp-300-s1"],
                                         appKeyOf: ["app-com.app": "com.app",
                                                    "tabgrp-300-s1": "com.other"]),
@@ -92,7 +169,7 @@ final class KeptAppPositionTests: XCTestCase {
                    appKeyOf: ["tabgrp-100-s3": "com.app"])
         // app-com.app enters grace, still in liveOrder temporarily
         // reconciled 只返回 current（用户只看到 tabgrp-100-s3），但 liveOrder 保留了 app-com.app 的位置
-        XCTAssertEqual(store.liveOrder, ["app-com.app", "tabgrp-100-s3"])
+        XCTAssertEqual(store.liveOrder, ["tabgrp-100-s1", "tabgrp-100-s2", "app-com.app", "tabgrp-100-s3"])
         XCTAssertEqual(store.reconciled(current: ["tabgrp-100-s3"],
                                         appKeyOf: ["tabgrp-100-s3": "com.app"]),
                        ["tabgrp-100-s3"])
@@ -134,23 +211,23 @@ final class KeptAppPositionTests: XCTestCase {
 
     // MARK: - e. sticky appKey pruning
 
-    func testStickyAppKeyPruning() {
+    func testLongAbsenceRetainsAppKeyAndOriginalPosition() {
         let timeBox = TimeBox(Date())
         let store = makeStore(timeBox: timeBox)
         // com.app 在左、com.other 在右——若粘性键/旧 id 未被清，重开的窗口会错误接回左边原位
         store.sync(current: ["tabgrp-100-s1", "tabgrp-300-s1"],
                    appKeyOf: ["tabgrp-100-s1": "com.app", "tabgrp-300-s1": "com.other"])
-        // com.app 关闭（非 kept，无占位注入），宽限过期后 id 与粘性键都应清掉
+        // Ordinary apps also retain their slot when absent, without requiring keep enabled.
         store.sync(current: ["tabgrp-300-s1"],
                    appKeyOf: ["tabgrp-300-s1": "com.other"])
         timeBox.time = Date().addingTimeInterval(6)
         store.sync(current: ["tabgrp-300-s1"],
                    appKeyOf: ["tabgrp-300-s1": "com.other"])
-        XCTAssertEqual(store.liveOrder, ["tabgrp-300-s1"])
-        // 新窗口重开：无残留记忆可匹配 → 追加末尾（com.other 右边），不复活旧位置
+        XCTAssertEqual(store.liveOrder, ["tabgrp-100-s1", "tabgrp-300-s1"])
+        // A replacement window must inherit the old app slot, before com.other.
         store.sync(current: ["tabgrp-300-s1", "tabgrp-100-s2"],
                    appKeyOf: ["tabgrp-300-s1": "com.other", "tabgrp-100-s2": "com.app"])
-        XCTAssertEqual(store.liveOrder, ["tabgrp-300-s1", "tabgrp-100-s2"])
+        XCTAssertEqual(store.reconciled(current: ["tabgrp-300-s1", "tabgrp-100-s2"], appKeyOf: ["tabgrp-300-s1": "com.other", "tabgrp-100-s2": "com.app"]), ["tabgrp-100-s2", "tabgrp-300-s1"])
     }
 
     // MARK: - f. persistableLiveOrder with keptIDs
@@ -374,7 +451,7 @@ final class KeptAppPositionTests: XCTestCase {
         timeBox.time = timeBox.time.addingTimeInterval(6) // 过 grace，旧 tabgrp-K 落地
         store.sync(current: ["tabgrp-A", "app-com.k", "tabgrp-B"],
                    appKeyOf: ["tabgrp-A": "com.a", "app-com.k": "com.k", "tabgrp-B": "com.b"])
-        XCTAssertEqual(store.liveOrder, ["tabgrp-A", "app-com.k", "tabgrp-B"])
+        XCTAssertEqual(store.liveOrder, ["tabgrp-A", "tabgrp-K", "app-com.k", "tabgrp-B"])
         // 重开：占位 → 新窗口 tabgrp-new（互斥，不共存）。首帧 render（sync 未跑）。
         let keys = ["tabgrp-A": "com.a", "tabgrp-new": "com.k", "tabgrp-B": "com.b"]
         let preSync = store.reconciled(current: ["tabgrp-A", "tabgrp-new", "tabgrp-B"], appKeyOf: keys)

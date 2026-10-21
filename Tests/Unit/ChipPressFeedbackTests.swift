@@ -8,6 +8,19 @@ import XCTest
 /// 现在改由 `DragGesture(minimumDistance: 0)` 在按下瞬间驱动，抬起时按下面的规则收尾。
 final class ChipPressFeedbackTests: XCTestCase {
 
+    func testDisabledScaleCannotShrinkForPressOrRelease() {
+        for pressed in [false, true, true, false, true, false] {
+            XCTAssertEqual(ChipPressDecision.scale(isPressed: pressed, enabled: false), 1)
+        }
+    }
+
+    func testScaleGateChangesImmediatelyAndKeepsOtherCarrierGeometry() {
+        XCTAssertEqual(ChipPressDecision.scale(isPressed: true, enabled: true), 0.93)
+        XCTAssertEqual(ChipPressDecision.scale(isPressed: true, enabled: false), 1)
+        XCTAssertEqual(ChipPressDecision.scale(isPressed: true, enabled: false, restingScale: 1.12), 1.12)
+        XCTAssertEqual(ChipPressDecision.scale(isPressed: false, enabled: true, restingScale: 1.12), 1.12)
+    }
+
     // MARK: - 最短保持
 
     /// 一次极快的点击（按下到抬起只有几毫秒）如果立刻弹回，那一下 0.93 缩放根本看不见。

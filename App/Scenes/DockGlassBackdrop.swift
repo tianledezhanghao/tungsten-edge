@@ -15,10 +15,16 @@ struct DockGlassBackdrop: View {
     var saturation: Double = 1.0
     var thicknessEnabled: Bool = false
     var matchesDockRefraction: Bool = false
+    var usesRawVariant3: Bool = false
 
     var body: some View {
         Group {
-            if #available(macOS 26.0, *), usesLiquidGlass, let variant = DockGlassPresentation.activeSystemVariant {
+            if #available(macOS 26.0, *), usesLiquidGlass, usesRawVariant3, TEDockGlassSupportsSystemVariant() {
+                DockSystemGlassVariantPlate(cornerRadius: cornerRadius, variant: 3,
+                                            matchesDockRefraction: false, usesDiagonalHighlight: false)
+                    .id("raw-variant-3")
+                    .allowsHitTesting(false)
+            } else if #available(macOS 26.0, *), usesLiquidGlass, let variant = DockGlassPresentation.activeSystemVariant {
                 DockSystemGlassVariantPlate(
                     cornerRadius: cornerRadius,
                     variant: variant,
@@ -43,7 +49,7 @@ struct DockGlassBackdrop: View {
             }
         }
         .onAppear {
-            DockGlassPresentation.logResolvedPath(compositeActive: usesLiquidGlass)
+            DockGlassPresentation.logResolvedPath(compositeActive: usesLiquidGlass, rawVariant3: usesRawVariant3)
             DockEffectSwitches.logActiveOverrides(
                 material: material,
                 saturation: saturation,
@@ -67,6 +73,7 @@ struct DockPanelBackdrop: View {
     let cornerRadius: CGFloat
     let usesLiquidGlass: Bool
     var matchesDockRefraction: Bool = false
+    var usesRawVariant3: Bool = false
 
     var body: some View {
         DockGlassBackdrop(material: theme.effectivePanelMaterial,
@@ -74,12 +81,13 @@ struct DockPanelBackdrop: View {
                           cornerRadius: cornerRadius,
                           saturation: theme.effectiveBackdropSaturation,
                           thicknessEnabled: theme.drawsEffectiveThickness,
-                          matchesDockRefraction: matchesDockRefraction)
+                          matchesDockRefraction: matchesDockRefraction,
+                          usesRawVariant3: usesRawVariant3)
             .padding(-DockLiquidGlassConfiguration.backdropOutset(
                 usesLiquidGlass: usesLiquidGlass,
-                usesSystemVariant: DockGlassPresentation.usesSystemVariant))
+                usesSystemVariant: usesRawVariant3 || DockGlassPresentation.usesSystemVariant))
             .dockBackdropClip(cornerRadius: cornerRadius,
-                              skip: usesLiquidGlass && DockGlassPresentation.usesSystemVariant)
+                              skip: usesLiquidGlass && (usesRawVariant3 || DockGlassPresentation.usesSystemVariant))
             .ignoresSafeArea()
     }
 }
@@ -99,6 +107,7 @@ extension View {
         style: S,
         lineWidth: CGFloat,
         usesLiquidGlass: Bool,
+        usesRawVariant3: Bool = false,
         highlighted: Bool = false
     ) -> some View {
         let configuration = DockGlassPresentation.configuration
@@ -111,7 +120,7 @@ extension View {
         }
         .overlay {
             if DockPanelRimPlan.glassRimVisible(usesLiquidGlass: usesLiquidGlass,
-                                                usesSystemVariant: DockGlassPresentation.usesSystemVariant) {
+                                                usesSystemVariant: usesRawVariant3 || DockGlassPresentation.usesSystemVariant) {
                 DockGlassRim(cornerRadius: cornerRadius, configuration: configuration)
             }
         }
@@ -240,17 +249,20 @@ enum DockGlassPresentation {
 
     /// 启动时打一行说明这次跑的是哪条路径。用 `print` 而不是 `Logger` —— 有些环境读不回
     /// 统一日志（同 `[edgehover]` 的理由）。
-    static func logResolvedPath(compositeActive: Bool) {
+    static func logResolvedPath(compositeActive: Bool, rawVariant3: Bool) {
         guard configuration.isEnabled else { return }
         if compositeActive {
             let c = configuration
+            print("[glass] taskbarSurface=\(rawVariant3 ? "variant3" : "classic")")
+            let variant = rawVariant3 ? 3 : activeSystemVariant
+            let enhanced = !rawVariant3
             let rim = "peak=\(c.borderPeakOpacity) edge=\(c.borderEdgeLevel) "
                 + "cut=\(c.borderCornerCut) spread=\(c.borderCornerSpread) w=\(c.borderLineWidth)"
             print("[glass] taskbar composite active, clearTint=\(c.clearTintOpacity), rim(\(rim)), "
                 + "background=\(c.backgroundMaterialOpacity), windowBlur=\(c.windowBlurRadius), "
-                + "systemVariant=\(activeSystemVariant.map(String.init) ?? "off"), "
-                + "dockRefraction=\(dockRefractionEnabled), diagonalHighlight=\(diagonalHighlightEnabled), "
-                + "highlightBoost=\(highlightBoostEnabled)")
+                + "systemVariant=\(variant.map(String.init) ?? "off"), "
+                + "dockRefraction=\(enhanced && dockRefractionEnabled), diagonalHighlight=\(enhanced && diagonalHighlightEnabled), "
+                + "highlightBoost=\(enhanced && highlightBoostEnabled)")
         } else if #available(macOS 26.0, *) {
             print("[glass] composite unavailable; using NSVisualEffectView")
         } else {
@@ -463,6 +475,8 @@ final class DockTaskbarLiquidGlassBackgroundView: NSView {
     private let dimmingOverlayView = NSView()
     private var configuration: DockLiquidGlassConfiguration
     private var plateCornerRadius: CGFloat
+    private var rawVariant3 = false
+    private var savedBackgroundColor: CGColor?
 
     init(
         frame frameRect: NSRect,
@@ -529,6 +543,17 @@ final class DockTaskbarLiquidGlassBackgroundView: NSView {
             view.layer?.masksToBounds = true
         }
         updateOverlayColor()
+    }
+
+    /// Raw variant 3 uses no auxiliary colour or visual-effect layers.
+    func setRawVariant3(_ enabled: Bool) {
+        if enabled && !rawVariant3 { savedBackgroundColor = layer?.backgroundColor }
+        if !enabled && rawVariant3 { layer?.backgroundColor = savedBackgroundColor }
+        rawVariant3 = enabled
+        liveBackdropSubscriptionView.isHidden = enabled
+        materialView.isHidden = enabled || configuration.backgroundMaterialOpacity <= 0
+        dimmingOverlayView.isHidden = enabled || configuration.dimmingOpacity <= 0
+        if enabled { layer?.backgroundColor = nil }
     }
 
     private func configureVisualEffectView(_ view: NSVisualEffectView) {

@@ -42,6 +42,7 @@ extension EnvironmentValues {
 }
 
 struct ChipView: View {
+    @Environment(\.dockShowRunningIndicators) private var showsRunningIndicators
     @EnvironmentObject var runtime: AppRuntime
     @EnvironmentObject var drawerStore: DrawerStore
     @EnvironmentObject var messagingStore: MessagingAppStore
@@ -147,7 +148,7 @@ struct ChipView: View {
 
     private var isMessagingAppWindow: Bool {
         guard let bid = item.bundleIdentifier else { return false }
-        return !item.isAppLevelFallback && messagingStore.contains(bid)
+        return !item.isAppLevelFallback && messagingStore.isZoneMember(bid)
     }
 
     var body: some View {
@@ -202,7 +203,7 @@ struct ChipView: View {
         // 拖起来的副本不画圆点（原生 Dock 同款：拖动时圆点消失，落位才回来）。
         // 位图在圆点那块因此是**透明**的，交接那一轮条上卡的圆点直接透出来——不会闪也不会晚。
         .overlay(alignment: .bottom) {
-            if showRunningDot && !isDragCarrierSnapshot {
+            if showsRunningIndicators && showRunningDot && !isDragCarrierSnapshot {
                 Capsule()
                     .fill(theme.runningDot.color)
                     .frame(width: (isFrontWindow ? ChipPillMetrics.frontWindowBarWidth : ChipPillMetrics.runningDotSize) * scale,
@@ -300,7 +301,7 @@ struct ChipView: View {
             appIcon(size: metrics.pillIconSize)
                 .frame(width: ChipPillMetrics.iconSlot * scale, height: ChipPillMetrics.iconSlot * scale)
                 // 未读角标（2026-08-23 起常规区的卡也画）：压在药丸里那枚小图标的右上角，按
-                // `titledCardBadgeScale` 缩一档——16pt 的角标盖在 22pt 的图标上太满。
+                // 使用紧凑角标，保持小图标上的通知数字可读。
                 // 同样挂在两个缩放之前，随悬停 / 按压 / 档位一起动。
                 .overlay(alignment: .topTrailing) {
                     if let badgeText {
@@ -325,7 +326,7 @@ struct ChipView: View {
         // like the dot (see `isDragCarrierSnapshot`). Placed before the scale modifiers so it moves
         // with the pill (size-tiers rule).
         .overlay(alignment: .bottom) {
-            if !isDragCarrierSnapshot {
+            if showsRunningIndicators && !isDragCarrierSnapshot {
                 Capsule()
                     .fill(theme.runningDot.color)
                     .frame(width: isFrontWindow ? ChipPillMetrics.frontWindowBarWidth * scale : 0,
@@ -420,13 +421,10 @@ struct ChipView: View {
     // MARK: - Shared Icon
 
     private func appIcon(size: CGFloat) -> some View {
-        Image(nsImage: AppIconResolver.icon(for: item.bundleIdentifier ?? item.appID, points: size,
-                                             displayScale: displayScale, colorScheme: colorScheme,
-                                             allowsRendering: !isPanelHeightResizing))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
+        PixelAlignedIcon(image: AppIconResolver.icon(for: item.bundleIdentifier ?? item.appID, points: size,
+            displayScale: displayScale, colorScheme: colorScheme, allowsRendering: !isPanelHeightResizing),
+            points: size)
             .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: size / 4, style: .continuous))
             // 我们**不额外加**外投影（owner 2026-08-19）：加过的那层是净多出来的，
             // 条上量到图标正下方比两侧空隙暗 18–24。中转格方块、文件夹封面同此。
             //

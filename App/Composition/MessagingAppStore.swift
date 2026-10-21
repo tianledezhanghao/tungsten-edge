@@ -24,6 +24,11 @@ import Foundation
 @MainActor
 final class MessagingAppStore: ObservableObject {
     @Published private(set) var bundleIDs: [String] = []
+    @Published private(set) var zoneEnabled: Bool
+    private let zoneEnabledKey = "messagingZoneEnabled"
+    /// Saved membership survives disabling the zone. Use this projection for placement.
+    var activeBundleIDs: [String] { zoneEnabled ? bundleIDs : [] }
+
     private var optOutIDs: Set<String> = []
     private let key = "messagingBundleIDsV2"
     private let optOutKey = "messagingOptOutBundleIDsV2"
@@ -61,6 +66,8 @@ final class MessagingAppStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        zoneEnabled = defaults.object(forKey: zoneEnabledKey) == nil
+            ? true : defaults.bool(forKey: zoneEnabledKey)
         // Name list V2: migrate from the frozen legacy key once, then own V2.
         // Empty is also persisted — key existence is the migration marker.
         if defaults.object(forKey: key) != nil {
@@ -79,6 +86,14 @@ final class MessagingAppStore: ObservableObject {
     }
 
     func contains(_ id: String) -> Bool { bundleIDs.contains(id) }
+
+    func isZoneMember(_ id: String) -> Bool { zoneEnabled && contains(id) }
+
+    func setZoneEnabled(_ enabled: Bool) {
+        guard zoneEnabled != enabled else { return }
+        zoneEnabled = enabled
+        defaults.set(enabled, forKey: zoneEnabledKey)
+    }
 
     /// 消息应用**身份**（决定角标），与「在不在消息区」无关：名单里的 / 内置白名单 /
     /// App Store 社交类目。类目误判（Ghostty 之类）没有副作用——它在系统 Dock 上没有
@@ -153,6 +168,7 @@ final class MessagingAppStore: ObservableObject {
     @discardableResult
     func autoRegister(runningBundleIDs: Set<String>,
                       mainWindowIdentifiableBundleIDs: Set<String>) -> [String] {
+        guard zoneEnabled else { return [] }
         var added: [String] = []
         for id in runningBundleIDs {
             guard !id.isEmpty, !bundleIDs.contains(id), !optOutIDs.contains(id) else { continue }

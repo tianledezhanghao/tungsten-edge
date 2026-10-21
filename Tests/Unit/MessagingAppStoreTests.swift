@@ -195,4 +195,36 @@ final class MessagingAppStoreTests: XCTestCase {
         XCTAssertFalse(store.isMessagingApp("com.example.nothing"))
         XCTAssertFalse(store.isMessagingApp(""))
     }
+    func testDisablingZonePreservesMembershipOrderAndBadgesAcrossReload() {
+        let defaults = makeDefaults()
+        let store = makeStore(["com.tencent.qq", "com.tencent.xinWeChat", "com.example.manual"], defaults: defaults)
+        XCTAssertTrue(store.zoneEnabled)
+        store.setZoneEnabled(false)
+        XCTAssertTrue(store.activeBundleIDs.isEmpty)
+        XCTAssertFalse(store.isZoneMember("com.tencent.qq"))
+        XCTAssertTrue(store.contains("com.tencent.qq"))
+        XCTAssertTrue(store.isMessagingApp("com.tencent.qq"))
+        XCTAssertTrue(store.isMessagingApp("com.example.manual"))
+        let restored = MessagingAppStore(defaults: defaults)
+        XCTAssertFalse(restored.zoneEnabled)
+        restored.setZoneEnabled(true)
+        XCTAssertEqual(restored.activeBundleIDs, ["com.tencent.qq", "com.tencent.xinWeChat", "com.example.manual"])
+        XCTAssertTrue(restored.isZoneMember("com.tencent.qq"))
+    }
+
+    func testDisabledZoneDoesNotAutoRegisterOrSeedKept() {
+        let defaults = makeDefaults()
+        let store = MessagingAppStore(defaults: defaults)
+        let kept = KeptAppStore(defaults: defaults)
+        let controller = AppMembershipController(keptAppStore: kept, drawerStore: DrawerStore(defaults: defaults), messagingStore: store)
+        store.setZoneEnabled(false)
+        controller.autoRegisterMessaging(runningBundleIDs: ["com.tencent.qq"], mainWindowIdentifiableBundleIDs: ["com.tencent.qq"])
+        XCTAssertFalse(store.contains("com.tencent.qq"))
+        XCTAssertFalse(kept.contains("com.tencent.qq"))
+        store.setZoneEnabled(true)
+        controller.autoRegisterMessaging(runningBundleIDs: ["com.tencent.qq"], mainWindowIdentifiableBundleIDs: ["com.tencent.qq"])
+        XCTAssertTrue(store.isZoneMember("com.tencent.qq"))
+        XCTAssertTrue(kept.contains("com.tencent.qq"))
+    }
+
 }

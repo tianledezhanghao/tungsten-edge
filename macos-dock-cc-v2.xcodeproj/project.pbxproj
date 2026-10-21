@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F83000000000000000000001 /* DockBottomGapControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = F83000000000000000000003 /* DockBottomGapControl.swift */; };
+		F83000000000000000000002 /* DockBottomGapControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = F83000000000000000000003 /* DockBottomGapControl.swift */; };
+
+		F82000000000000000000004 /* DockGlassRuntimeBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000003 /* DockGlassRuntimeBridge.m */; };
 		D7A0000000000000000000A2 /* DrawerAppDrop.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A0000000000000000000A0 /* DrawerAppDrop.swift */; };
 		D7A0000000000000000000D1 /* ExternalDragSpringLoad.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A0000000000000000000D0 /* ExternalDragSpringLoad.swift */; };
 		D7A0000000000000000000D2 /* ExternalDragSpringLoad.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7A0000000000000000000D0 /* ExternalDragSpringLoad.swift */; };
@@ -204,6 +208,7 @@
 		A0000000000000000000FF01 /* LaunchGateDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000FF00 /* LaunchGateDecision.swift */; };
 		A00000000000000000001C01 /* IconRenditionChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000001C00 /* IconRenditionChoice.swift */; };
 		A00000000000000000001C21 /* IconBitmapRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000001C20 /* IconBitmapRenderer.swift */; };
+		A00000000000000000001C22 /* IconBitmapRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000001C20 /* IconBitmapRenderer.swift */; };
 		B10000000000000000000008 /* BadgeReadPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000106 /* BadgeReadPlan.swift */; };
 		B1000000000000000000000E /* HoverPollThrottle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000109 /* HoverPollThrottle.swift */; };
 		B1000000000000000000010E /* MinimizeHandoffTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000010D /* MinimizeHandoffTarget.swift */; };
@@ -558,6 +563,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		F83000000000000000000003 /* DockBottomGapControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DockBottomGapControl.swift; sourceTree = "<group>"; };
 		D7A0000000000000000000B0 /* DrawerAppDropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawerAppDropTests.swift; sourceTree = "<group>"; };
 		D7A0000000000000000000C0 /* DrawerAppDropReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawerAppDropReceiver.swift; sourceTree = "<group>"; };
 		D7A0000000000000000000A0 /* DrawerAppDrop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawerAppDrop.swift; sourceTree = "<group>"; };
@@ -1096,6 +1102,7 @@
 				B75000000000000000000013 /* WelcomeGuideView.swift */,
 				F1A0000000000000000000C0 /* HotKeyRecorderView.swift */,
 				F2A0000000000000000000A0 /* SettingsTab.swift */,
+				F83000000000000000000003 /* DockBottomGapControl.swift */,
 				D10000000000000000000002 /* SettingsWindowView.swift */,
 				A00000000000000000000067 /* DockStripView.swift */,
 				A00000000000000000009D00 /* WindowTitleTooltip.swift */,
@@ -1767,6 +1774,7 @@
 					A00000000000000000001001 /* MacOSDockCCV2App.swift in Sources */,
 					A00000000000000000001040 /* AppDelegate.swift in Sources */,
 					D20000000000000000000001 /* SettingsWindowController.swift in Sources */,
+					F83000000000000000000001 /* DockBottomGapControl.swift in Sources */,
 					D20000000000000000000002 /* SettingsWindowView.swift in Sources */,
 					D20000000000000000000003 /* SettingsCoordinator.swift in Sources */,
 					B78000000000000000000011 /* LicenseStore.swift in Sources */,
@@ -2047,6 +2055,7 @@
 				D20000000000000000000063 /* StripHoverResolutionTests.swift in Sources */,
 				D20000000000000000000066 /* DragLandingPlanTests.swift in Sources */,
 				D2000000000000000000006A /* StripBlockLandingTests.swift in Sources */,
+				F83000000000000000000002 /* DockBottomGapControl.swift in Sources */,
 				A00000000000000000008041 /* AppSettingsStoreTests.swift in Sources */,
 				A00000000000000000009F02 /* GlobalHotKeyMonitor.swift in Sources */,
 				F1A0000000000000000000A2 /* HotKeyShortcutValidation.swift in Sources */,
@@ -2135,6 +2144,8 @@
 				A0000000000000000000EA11 /* FrontWindowIndicatorDecisionTests.swift in Sources */,
 				A0000000000000000000FF11 /* LaunchGateDecisionTests.swift in Sources */,
 				A00000000000000000001C11 /* IconRenditionChoiceTests.swift in Sources */,
+				A00000000000000000001C22 /* IconBitmapRenderer.swift in Sources */,
+				F82000000000000000000004 /* DockGlassRuntimeBridge.m in Sources */,
 				A0000000000000000000FF31 /* AppLaunchTargetDecisionTests.swift in Sources */,
 				A0000000000000000000FF41 /* WindowDisplayTitleTests.swift in Sources */,
 				A0000000000000000000FD01 /* DockThemeTests.swift in Sources */,
@@ -2364,7 +2375,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.18.2;
-				PRODUCT_BUNDLE_IDENTIFIER = com.caye.macosdockcc.v2;
+				PRODUCT_BUNDLE_IDENTIFIER = com.caye.macosdockcc.v2.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = targeted;
@@ -2436,6 +2447,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.caye.macosdockcc.v2.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OBJC_BRIDGING_HEADER = "App/TungstenEdge-Bridging-Header.h";
 				SWIFT_STRICT_CONCURRENCY = targeted;
 				SWIFT_VERSION = 5.0;
 			};
@@ -2456,6 +2468,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_OBJC_BRIDGING_HEADER = "App/TungstenEdge-Bridging-Header.h";
 				SWIFT_STRICT_CONCURRENCY = targeted;
 				SWIFT_VERSION = 5.0;
 			};

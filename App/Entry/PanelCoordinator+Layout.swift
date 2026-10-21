@@ -70,7 +70,9 @@ extension PanelCoordinator {
     }
 
     func subscribeMessagingStoreWidth() {
-        messagingStoreWidthSubscription = messagingStore.$bundleIDs
+        messagingStoreWidthSubscription = Publishers.CombineLatest(
+            messagingStore.$bundleIDs, messagingStore.$zoneEnabled
+        )
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 DispatchQueue.main.async { [weak self] in
@@ -151,6 +153,23 @@ extension PanelCoordinator {
                 if self.folderPopupWantsOpen, self.openPopupContent == .trash { self.closeFolderPopup() }
                 DispatchQueue.main.async { [weak self] in self?.relayout(animated: true) }
             }
+        glassBackgroundSubscription = settingsStore.$dockBackgroundStyle
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateGlassBackground() }
+        showDrawerSubscription = settingsStore.$showDrawer
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.drawerAvailabilityChanged() }
+        dockBottomGapSubscription = settingsStore.$dockBottomGap
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                // Retire popups anchored to the old position before moving every panel.
+                self?.beginPanelHeightChange()
+            }
         dockPanelHeightSubscription = heightResizePresentation
             .nonInteractiveHeightChanges(from: settingsStore.$dockPanelHeight)
             .sink { [weak self] _ in
@@ -176,6 +195,13 @@ extension PanelCoordinator {
     /// the Equatable `WindowLiftAvoidanceContext`, so the controller's existing restore → re-lift
     /// path runs on its own (frozen during a drag, see `liftContextPanelHeightOverride`).
     func beginPanelHeightChange() {
+        if dockVisibilityMotion != nil {
+            if !panelsAreVisible {
+                orderDockSurfaceOut()
+                capsulePanel?.orderOut(nil)
+            }
+            cancelDockVisibilityAnimation()
+        }
         tearDownForPanelHeightChange()
         let generation = panelHeightChangeGeneration
         DispatchQueue.main.async { [weak self] in
@@ -298,6 +324,13 @@ extension PanelCoordinator {
     /// 开屏/切屏/多屏悬停传 animated:false；内容变化、收纳/移回、抽屉尺寸变化传 animated:true。
     func layoutPanels(contentWidth: CGFloat, on screen: NSScreen, animated: Bool, batched: Bool = false) {
         guard let dock = dockPanel, let capsule = capsulePanel else { return }
+        if dockVisibilityMotion != nil, panelCurrentScreen(panel: dock) != screen {
+            if !panelsAreVisible {
+                orderDockSurfaceOut()
+                capsulePanel?.orderOut(nil)
+            }
+            cancelDockVisibilityAnimation()
+        }
         let panelScreenCGFrame = Self.toCGRect(screen)
         if let transaction = fullscreenIntentTransaction,
            transaction.screenCGFrame != panelScreenCGFrame {
@@ -329,6 +362,7 @@ extension PanelCoordinator {
                 cornerRadius: taskbarPlateCornerRadius,
                 configuration: DockGlassPresentation.configuration
             )
+            dockGlassBackgroundView?.setRawVariant3(settingsStore.dockBackgroundStyle == .variant3)
             // 背景窗口贴着可视底板（内容窗口减掉 20pt 阴影透明边）。
             pairs.append((
                 background,
@@ -339,7 +373,7 @@ extension PanelCoordinator {
             ))
         }
         pairs.append((dock, dockT))
-        pairs.append((capsule, capsuleT))
+        if settingsStore.showDrawer { pairs.append((capsule, capsuleT)) }
         if let drawer = drawerPanel, drawer.isVisible, let hosting = drawerContentHost {
             // Smaller than any plate = not laid out yet, never a size: keep the last good one.
             let fitting = hosting.fittingSize
@@ -348,8 +382,18 @@ extension PanelCoordinator {
             lastDrawerTargetFrame = drawerT
             pairs.append((drawer, drawerT))
         }
+        updateGlassBackground()
         let commit = setFrames(pairs, animated: anim, batched: batched)
         if drawerWantsOpen { syncDrawerArrow(after: commit) }
+    }
+
+    func updateGlassBackground() {
+        dockGlassBackgroundView?.setRawVariant3(settingsStore.dockBackgroundStyle == .variant3)
+        if let radius = DockGlassPresentation.configuration.requestedWindowBlurRadius,
+           let background = dockGlassBackgroundPanel {
+            _ = TEDockGlassSetWindowBackgroundBlurRadius(background.windowNumber,
+                settingsStore.dockBackgroundStyle == .variant3 ? 0 : radius)
+        }
     }
 
     /// 量当前内容宽度后布局（内容变化的统一入口）。
@@ -413,6 +457,12 @@ extension PanelCoordinator {
             return .unchanged
         }
         lastCommittedFrames = targets
+        if dockVisibilityMotion != nil {
+            // Content can resize during a reveal. Update its resting geometry, but never
+            // let a separate AppKit frame animator overwrite the visibility spring.
+            renderDockVisibilityOffset()
+            return .instant
+        }
         guard animated else {
             if CACurrentMediaTime() < animatedFramesUntil {
                 // An animator group is still flying: a direct `setFrame` gets overwritten by its

@@ -33,13 +33,16 @@ extension DockStripView {
         let hiddenBundleIDs = Set(snapshotItems.compactMap { item in
             item.status == "hidden" ? item.bundleIdentifier : nil
         })
+        // A disabled drawer must not leave its apps unreachable behind a hidden entrance.
+        let drawerIDs = settingsStore.showDrawer ? drawerStore.bundleIDs : []
+        let drawerSet = Set(drawerIDs)
         let keptIDs = keptAppStore.bundleIDs
         let runningIDs = runningApplicationStore.runningBundleIDs
         // 统一模型：消息区可见 = (messaging − drawer) ∩ (running ∪ kept)。消息身份不再独立保活，
         // 由 kept 决定退出后留不留（首次标记即补 kept，默认观感不变）；抽屉例外仍隐藏（抽屉优先级更高）。
         let msg = AppMembershipProjection.visibleMessagingIDs(
-            messagingIDs: messagingStore.bundleIDs,
-            drawerIDs: drawerStore.bundleIDs,
+            messagingIDs: messagingStore.activeBundleIDs,
+            drawerIDs: drawerIDs,
             keptIDs: keptIDs,
             runningIDs: runningIDs
         )
@@ -51,7 +54,7 @@ extension DockStripView {
         )
         let items = snapshotItems.filter { item in
             let bid = item.bundleIdentifier ?? ""
-            if drawerStore.contains(bid) { return false }
+            if drawerSet.contains(bid) { return false }
             if item.isAppLevelFallback, FinderTaskbarPolicy.isFinder(bid), !showsFinderEntry { return false }
             return true
         }
@@ -99,7 +102,7 @@ extension DockStripView {
         let snapshotByBundle = Dictionary(grouping: snapshotItems, by: { $0.bundleIdentifier ?? "" })
         var keptPlaceholders: [StripEntry] = []
         for bid in keptIDs {
-            guard !drawerStore.contains(bid),
+            guard !drawerSet.contains(bid),
                   !msgSet.contains(bid) else { continue }
             // 访达有意留在 `.window` 兜底卡这条路径上：它带着专属菜单（最近使用的文件夹 /
             // 新建窗口）和「点击开主目录」，换成 .keptApp 的 LauncherChip 会把这些全丢掉。
@@ -120,13 +123,19 @@ extension DockStripView {
             // Both sources inject .keptApp with id "app-\(bid)"
             keptPlaceholders.append(.keptApp(bundleID: bid))
         }
+        let missingRunning = AppMembershipProjection.missingRunningAppIDs(
+            runningIDs: runningIDs, representedIDs: snapshotBundleIDs, keptIDs: keptIDs,
+            messagingIDs: msg, drawerIDs: drawerIDs,
+            excludedIDs: Set([FinderTaskbarPolicy.bundleID, Bundle.main.bundleIdentifier].compactMap { $0 })
+        )
+        liveNatural.append(contentsOf: missingRunning.map { .keptApp(bundleID: $0) })
         let projectedLive = keptPlaceholders + liveNatural
         let liveOrderIDs = projectedLive.map(\.id)
         let appKeys = Self.appKeys(of: projectedLive)
         let order = stripOrderStore.reconciled(
             current: liveOrderIDs,
             appKeyOf: appKeys,
-            headPreferred: Set(messagingStore.bundleIDs)
+            headPreferred: []
         )
         let byID = Dictionary(projectedLive.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let orderedLive = order.compactMap { byID[$0] }

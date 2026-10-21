@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     lazy var stripOrderStore = StripOrderStore(
         keptIDsProvider: { [keptAppStore] in Set(keptAppStore.bundleIDs) },
         stableKeptOrderProvider: { [keptAppStore, messagingStore] in
-            keptAppStore.bundleIDs.filter { !messagingStore.contains($0) }
+            keptAppStore.bundleIDs.filter { !messagingStore.isZoneMember($0) }
         },
         inventoryLog: inventoryLog
     )
@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let licenseStore = LicenseStore()
     private lazy var settingsWindowController = SettingsWindowController(
         store: settingsStore,
+        messagingStore: messagingStore,
         coordinator: settingsCoordinator,
         licenseStore: licenseStore,
         // 直通 showWelcomeWindow()，不走 presentWelcomeGuideIfNeeded()——那条对
@@ -91,7 +92,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionHostingView: NSHostingView<PermissionOnboardingWindowContent>?
     private var welcomeWindow: NSWindow?
     private var workspaceObservers: [NSObjectProtocol] = []
-    private var messagingAutoRegisterSubscription: AnyCancellable?
     private var badgeContextSubscription: AnyCancellable?
     private var windowLiftSettingSubscription: AnyCancellable?
     private var trashSettingSubscription: AnyCancellable?
@@ -121,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onMenuVisibilityChanged: { [weak self] isOpen in
             self?.panelCoordinator?.setTaskbarMenuOpen(isOpen)
         },
+        onRestart: { SettingsWindowContent.relaunch() },
         onQuit: { NSApp.terminate(nil) },
         hotKeyGlyphs: { [weak self] in
             self?.edgeToggleHotKey?.shortcut.displayGlyphs
@@ -510,36 +511,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         runningApplicationStore.start()
         runtime.start()
 
-        // Auto tier of the messaging list: register an app only when it both matches the
-        // whitelist / social-networking category **and** currently has an identifiable main
-        // window, then seed kept on first registration (default-keep). Kept no longer excludes
-        // messaging, so there is no kept filter.
-        //
-        // The window snapshot is combined in because the capability gate needs titles — the
-        // process store alone cannot tell whether the zone can represent the app. Registration
-        // is once-and-for-all (see `MessagingAppStore.autoRegister`), so the "identifiable right
-        // now" reading is only ever consumed for apps not yet in the list; existing members are
-        // never re-tested and therefore never flap out of the zone.
-        messagingAutoRegisterSubscription = runningApplicationStore.$runningBundleIDs
-            .combineLatest(runtime.$snapshot)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] running, snapshot in
-                guard let self else { return }
-                let identifiable = MessagingZoneAdmission.mainWindowIdentifiableBundleIDs(
-                    windows: StripItem.items(from: snapshot).map {
-                        .init(bundleID: $0.bundleIdentifier ?? "",
-                              title: $0.title,
-                              isAppLevelFallback: $0.isAppLevelFallback)
-                    },
-                    titleMatchesAppName: { title, bundleID in
-                        AppDisplayNameResolver.titleMatchesAppName(title, bundleID: bundleID)
-                    }
-                )
-                self.appMembershipController.autoRegisterMessaging(
-                    runningBundleIDs: running,
-                    mainWindowIdentifiableBundleIDs: identifiable
-                )
-            }
+        // Left-zone membership is now explicit user placement. Snapshot updates must
+        // never auto-register/migrate an existing live-zone icon to a different zone.
+        // Messaging identity for badges remains independent below.
 
         // 角标读取范围 = 消息应用**身份** ∩ 在跑 − 抽屉（2026-08-23 起不再要求在消息区里：
         // 信息 / Slack 这类进不了区的单窗口应用，红点画在它们常规区的卡上）。名单或在跑集合
@@ -826,8 +800,6 @@ extension AppDelegate: PermissionEffectHandler {
         settingsWindowController.close()
         // 欢迎引导同理，而且更刺眼：任务条已经没了，屏幕上还留着一扇教你怎么配置它的窗。
         closeWelcomeWindow()
-        messagingAutoRegisterSubscription?.cancel()
-        messagingAutoRegisterSubscription = nil
         badgeContextSubscription?.cancel()
         badgeContextSubscription = nil
         runtime.onToggleDrawer = nil

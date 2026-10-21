@@ -99,7 +99,7 @@ extension DockStripView {
         }
         return StripDropRouting.appDropMayWidenOnHover(
             isRunning: runningApplicationStore.isRunning(bundleID),
-            isMessaging: messagingStore.contains(bundleID),
+            isMessaging: messagingStore.isZoneMember(bundleID),
             isFinder: FinderTaskbarPolicy.isFinder(bundleID),
             hasEntryOnStrip: !freshProjection().liveEntryIDs(bundleID: bundleID).isEmpty
         )
@@ -123,7 +123,9 @@ extension DockStripView {
     }
 
     static var entryTransition: AnyTransition {
-        .scale(scale: 0.88).combined(with: .opacity)
+        // Window inventory may replace a window card with an app fallback while idle.
+        // Such bookkeeping must not make the application icon shrink and grow.
+        .opacity
     }
 
     /// A card an app drop just added enters with no transition of its own: it takes the gap's slot
